@@ -5,7 +5,8 @@ EXIT_USAGE = 1
 EXIT_ENDPOINT = 2
 EXIT_AUTH = 3
 EXIT_RISK = 4
-EXIT_ABORT = 5
+EXIT_STRUCTURE = 5
+EXIT_ABORT = 6
 
 
 class FishbookError(Exception):
@@ -70,6 +71,20 @@ class BusinessError(FishbookError):
 
     exit_code = EXIT_USAGE
     code = "MTOP_ERROR"
+
+
+class StructureError(FishbookError):
+    """页面结构不符：选择器失效、输入框不唯一等。"""
+
+    exit_code = EXIT_STRUCTURE
+    code = "STRUCTURE"
+
+
+class NotFoundError(FishbookError):
+    """目标内容不存在（按方案映射到退出码 3）。"""
+
+    exit_code = EXIT_AUTH
+    code = "NOT_FOUND"
 
 
 class AbortError(FishbookError):

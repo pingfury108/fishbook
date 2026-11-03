@@ -10,7 +10,7 @@ import sys
 from . import cdp
 from .cdp import MTOP_READY_JS
 from .errors import EXIT_ENDPOINT, EXIT_OK, EndpointError, FishbookError, UsageError
-from .sites.red import item as red_item
+from .sites.red import note as red_note
 from .sites.red import search as red_search
 from .sites.red import web as red_web
 from .sites.xy import item as xy_item
@@ -93,7 +93,7 @@ def _red_search_table(notes: list[dict]) -> None:
         [
             {
                 "note_id": note["note_id"],
-                "liked": note["liked"],
+                "likes": note["likes"],
                 "type": note["type"],
                 "title": note["title"],
                 "author": note["author"],
@@ -102,7 +102,7 @@ def _red_search_table(notes: list[dict]) -> None:
         ],
         [
             ("note_id", "NOTE_ID"),
-            ("liked", "LIKED"),
+            ("likes", "LIKES"),
             ("type", "TYPE"),
             ("title", "TITLE"),
             ("author", "AUTHOR"),
@@ -176,42 +176,72 @@ def _record_factory(checks: list[dict]):
     return record
 
 
+def _check_xy(page, record, current: str, keyword: str) -> None:
+    # cookie 按站点查，否则标签停在 chrome:// 时永远查不到
+    cookie_url = current if "goofish.com" in current else "https://www.goofish.com/"
+    cookies = page.send("Network.getCookies", {"urls": [cookie_url]})
+    names = {c.get("name") for c in cookies.get("cookies") or []}
+    for name in ("unb", "tracknick"):
+        record(
+            f"cookie {name}", name in names, "存在" if name in names else f"缺失（{cookie_url}）"
+        )
+
+    ready = bool(page.evaluate(MTOP_READY_JS, retries=2))
+    record("mtop SDK", ready, "就绪" if ready else "未就绪（先把该标签打开 goofish.com）")
+
+    # 只是惩罚期痕迹，不代表当前请求一定被拦，仅作提示
+    punish = has_punish_cookie(page)
+    record("x5sec 痕迹", True, "存在（曾被惩罚，注意限速）" if punish else "无")
+
+    if ready and keyword:
+        try:
+            data = xy_search.fetch_page(page, keyword)
+            entries = data.get("resultList") or []
+            record("最小搜索", bool(entries), f"{len(entries)} 条（keyword={keyword}）")
+        except FishbookError as exc:
+            record("最小搜索", False, exc.message)
+
+
+def _check_red(page, record, keyword: str) -> None:
+    names = red_web.cookie_names(page)
+    record(
+        "cookie web_session", "web_session" in names, "存在" if "web_session" in names else "缺失"
+    )
+    # 出现 last_web_session 说明登录态被风控降级过，需要重新登录
+    demoted = "last_web_session" in names
+    record("登录态未降级", not demoted, "被降级（需重新登录）" if demoted else "正常")
+
+    has_input = bool(page.evaluate("!!document.querySelector('#search-input')", retries=2))
+    record(
+        "搜索输入框 #search-input",
+        has_input,
+        "存在" if has_input else "不存在（先访问 xiaohongshu.com/explore）",
+    )
+
+    if keyword:
+        try:
+            notes = red_search.run(page, keyword, limit=5)
+            record("最小搜索", bool(notes), f"{len(notes)} 条（keyword={keyword}）")
+        except FishbookError as exc:
+            record("最小搜索", False, exc.message)
+
+
 def cmd_check(args) -> int:
+    site = args.site or ""
     raw = args.cdp or os.environ.get("FISHBOOK_CDP") or None
     base, ws_url = cdp.normalize_endpoint(raw)
     checks: list[dict] = []
     record = _record_factory(checks)
-    ws_url = _check_head(base, ws_url, record, "xy")
+    ws_url = _check_head(base, ws_url, record, site or "xy")
 
     page = cdp.CDP(ws_url).connect()
     try:
         current = page.url()
         record("当前 URL", bool(current), current)
-        # cookie 按站点查，否则标签停在 chrome:// 时永远查不到
-        cookie_url = current if "goofish.com" in current else "https://www.goofish.com/"
-        cookies = page.send("Network.getCookies", {"urls": [cookie_url]})
-        names = {c.get("name") for c in cookies.get("cookies") or []}
-        for name in ("unb", "tracknick"):
-            record(
-                f"cookie {name}",
-                name in names,
-                "存在" if name in names else f"缺失（{cookie_url}）",
-            )
-
-        ready = bool(page.evaluate(MTOP_READY_JS, retries=2))
-        record("mtop SDK", ready, "就绪" if ready else "未就绪（先把该标签打开 goofish.com）")
-
-        # 只是惩罚期痕迹，不代表当前请求一定被拦，仅作提示
-        punish = has_punish_cookie(page)
-        record("x5sec 痕迹", True, "存在（曾被惩罚，注意限速）" if punish else "无")
-
-        if ready and args.keyword:
-            try:
-                data = xy_search.fetch_page(page, args.keyword)
-                entries = data.get("resultList") or []
-                record("最小搜索", bool(entries), f"{len(entries)} 条（keyword={args.keyword}）")
-            except FishbookError as exc:
-                record("最小搜索", False, exc.message)
+        if site == "xy":
+            _check_xy(page, record, current, args.keyword)
+        elif site == "red":
+            _check_red(page, record, args.keyword)
     finally:
         page.close()
 
@@ -252,16 +282,16 @@ def cmd_xy_item(args) -> int:
 def cmd_red_search(args) -> int:
     page = open_target(args, "red")
     try:
-        notes = red_search.run(page, args.keyword, limit=args.limit)
+        notes = red_search.run(page, args.keyword, limit=args.limit, max_scrolls=args.max_scrolls)
     finally:
         page.close()
     return emit_ok(notes, args.format, _red_search_table)
 
 
-def cmd_red_item(args) -> int:
+def cmd_red_note(args) -> int:
     page = open_target(args, "red")
     try:
-        note = red_item.run(page, args.note_id, args.token)
+        note = red_note.run(page, args.target)
     finally:
         page.close()
     return emit_ok(note, args.format, _item_table)
@@ -320,8 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    check = sub.add_parser("check", help="自检：端点 / target / 登录态 / mtop / 最小搜索")
-    check.add_argument("--keyword", default="test", help="最小搜索用的关键词，传空串跳过该步")
+    check = sub.add_parser("check", help="自检：端点 / target / 当前 URL / cookie，可叠加站点细节")
+    check.add_argument(
+        "--site", choices=("xy", "red"), help="追加站点细节：xy=mtop 就绪；red=输入框/登录态"
+    )
+    check.add_argument("--keyword", default="", help="最小搜索用的关键词，留空跳过该步")
 
     xy = sub.add_parser("xy", help="闲鱼")
     xy_sub = xy.add_subparsers(dest="xy_command", required=True)
@@ -342,14 +375,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     red_search_parser = red_sub.add_parser("search", help="关键词搜索（SSR 首屏）")
     red_search_parser.add_argument("keyword")
-    red_search_parser.add_argument("--limit", type=int, default=20, help="条数上限（默认 20）")
+    red_search_parser.add_argument(
+        "--limit", type=int, default=20, help="条数上限（默认 20，最多 60）"
+    )
+    red_search_parser.add_argument(
+        "--max-scrolls", type=int, default=15, help="最多滚动轮数（默认 15）"
+    )
 
-    red_item_parser = red_sub.add_parser("item", help="笔记详情")
-    red_item_parser.add_argument("note_id")
-    red_item_parser.add_argument("--token", default="", help="xsec_token（从 search 结果里拿）")
-
-    red_check = red_sub.add_parser("check", help="自检：端点 / target / 登录态 / 最小搜索")
-    red_check.add_argument("--keyword", default="", help="最小搜索用的关键词，留空跳过该步")
+    red_note_parser = red_sub.add_parser("note", help="笔记详情")
+    red_note_parser.add_argument(
+        "target", help="完整 note URL（推荐，带 xsec_token）或 24 位 note_id"
+    )
     return parser
 
 
@@ -364,10 +400,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_xy_item(args)
         if getattr(args, "red_command", None) == "search":
             return cmd_red_search(args)
-        if getattr(args, "red_command", None) == "item":
-            return cmd_red_item(args)
-        if getattr(args, "red_command", None) == "check":
-            return cmd_red_check(args)
+        if getattr(args, "red_command", None) == "note":
+            return cmd_red_note(args)
         raise UsageError("未知子命令")
     except FishbookError as exc:
         emit_error(exc)

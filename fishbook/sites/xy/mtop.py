@@ -26,13 +26,6 @@ SESSION_FAILS = ("FAIL_SYS_SESSION_EXPIRED",)
 X5SEC_URL = "https://h5api.m.goofish.com/"
 
 
-def render(template: str, **values) -> str:
-    """把 __KEY__ 占位符换成 JSON 字面量，避免手写转义。"""
-    for key, value in values.items():
-        template = template.replace(f"__{key}__", json.dumps(value, ensure_ascii=False))
-    return template
-
-
 def ret_code(envelope: dict) -> str:
     ret = envelope.get("ret")
     if isinstance(ret, str):

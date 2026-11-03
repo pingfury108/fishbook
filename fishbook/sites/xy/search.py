@@ -9,8 +9,8 @@ import urllib.parse
 
 from ...cdp import CDP
 from ...errors import AbortError, BusinessError, EndpointError, UsageError
-from ...util import log, number, sleep_jitter
-from .mtop import JS_DIR, call, ensure_ready, render
+from ...util import log, number, render, sleep_jitter
+from .mtop import JS_DIR, call, ensure_ready
 
 ROWS_PER_PAGE = 30
 MAX_LIMIT = 60

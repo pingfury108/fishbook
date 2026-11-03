@@ -37,10 +37,13 @@ fishbook --cdp 127.0.0.1:9222 xy search "相机" --min-price 1000 --max-price 30
 # 商品详情
 fishbook --cdp 127.0.0.1:9222 xy item 1040754408976
 
-# 小红书：搜索（SSR 首屏）/ 笔记详情 / 自检
-fishbook --cdp 127.0.0.1:9222 red search "macbook"
-fishbook --cdp 127.0.0.1:9222 red item 6ad1ebbd000000001500cab7 --token <xsec_token>
-fishbook --cdp 127.0.0.1:9222 red check
+# 小红书：搜索 / 笔记详情（UI 自动化，不调接口）
+fishbook --cdp 127.0.0.1:9222 red search "macbook" --limit 20
+fishbook --cdp 127.0.0.1:9222 red note "https://www.xiaohongshu.com/explore/6ad1ebbd000000001500cab7?xsec_token=ABUp..."
+
+# 站点级自检细节
+fishbook --cdp 127.0.0.1:9222 check --site xy
+fishbook --cdp 127.0.0.1:9222 check --site red --keyword macbook
 
 # 人眼查看
 fishbook -f table xy search "macbook"
@@ -54,7 +57,12 @@ CDP 地址优先级：`--cdp` > `$FISHBOOK_CDP` > `http://127.0.0.1:9222`。支�
 | `127.0.0.1:9222` | 补 `http://` |
 | `ws://…/devtools/page/<id>` | 视为已指定 target，跳过发现 |
 
-`check` 依次检查：端点连通、page target 列表、当前 URL、`unb` / `tracknick` cookie（按 `goofish.com` 查，不按当前地址）、`window.lib.mtop` 就绪、x5sec 风控 cookie、一次最小搜索。
+`check` 的通用部分是端点连通 / page target 列表 / 当前 URL / cookie；加 `--site` 再叠加站点细节：
+
+| 命令 | 追加检查 |
+|---|---|
+| `check --site xy` | `unb` / `tracknick` cookie、`window.lib.mtop` 就绪、x5sec 痕迹（`--keyword` 时加一次最小搜索） |
+| `check --site red` | `web_session` cookie、登录态是否被降级、`#search-input` 是否存在（`--keyword` 时加一次最小搜索） |
 
 target 发现：优先选 url 命中 `goofish.com` 的 page target；若只有一个 page target（比如 `chrome://newtab`）就回退到它并由工具导航过去；多个都不匹配则报错并列出。
 
@@ -71,9 +79,10 @@ stderr  →  进度 / 重试 / 风控告警
 | 0 | 成功 |
 | 1 | 参数错误 / MTOP 业务错误 |
 | 2 | 连不上 CDP 端点 / 找不到匹配的 page target / 页面未就绪 |
-| 3 | 登录态失效，需要人工重新登录 |
+| 3 | 未登录 / 登录态失效 / 目标不存在 |
 | 4 | 触发风控 |
-| 5 | 连续失败熔断 |
+| 5 | 页面结构不符（选择器失效、输入框不唯一等） |
+| 6 | 连续失败熔断 |
 
 ## 限速
 
@@ -110,27 +119,68 @@ stderr  →  进度 / 重试 / 风控告警
 | `labels` | `itemDO.itemLabelExtList[].text`（分类 / 品牌 / 内存…） |
 | `seller` | `sellerDO`: `nick` `sellerId` `publishCity` `xianyuSummary` `replyRatio24h` `replyInterval` |
 
-## 小红书（red）
+## 小红书（red）：没有 SDK 可借，只能点页面
 
-不用 API，直接读页面自身 SSR 下来的 `window.__INITIAL_STATE__`，请求量等于普通浏览一次页面。
-
-为什么不用 API：`/api/sns/web/v1/search/notes`、`/api/sns/web/v1/feed` 需要 `X-s` / `X-t` /
-`X-S-Common` 三件套，其中 `X-s`/`X-t` 可由页面里的 `window._webmsxyw(api, payload)` 现算，
-但实测（已签名、已带上真实 `X-S-Common`）仍返回：
+小红书 web API（`edith.xiaohongshu.com/api/sns/web/...`）要 `X-s` / `X-t` / `X-S-Common` 三个头。
+`window._webmsxyw` 只产生前两个；`X-S-Common` 与浏览器指纹绑定，手工 `fetch()` 会被
+**461 / 300015「浏览器运行环境异常」** 拒绝。本仓库实测（现算 `X-s`/`X-t` + 实时抓到的真实
+`X-S-Common`，签名本身有效，`user/me` 能返回 `code 0`）后仍然吃：
 
 ```
 {"code":300011,"success":false,"msg":"当前账号存在异常，请切换账号后重试"}
 ```
 
-且服务端会把 `web_session` 降级（cookie 里多一个 `last_web_session`），页面变成「登录后查看搜索结果」。
+并且服务端会把 `web_session` 降级成 `last_web_session`，页面变成「登录后查看搜索结果」。
+**结论：闲鱼的 mtop 模式无法平移到小红书，不自己算签名，也不走 `evaluate(fetch)`。**
 
-| 子命令 | 说明 |
+所以走页面自身的搜索链路，请求量等于人工浏览：
+
+| 步骤 | 做法 |
 |---|---|
-| `red search <kw> [--limit 20]` | 只能拿到 SSR 首屏（实测 ~22 条），翻页需 API，当前环境不可用 |
-| `red item <note_id> [--token <xsec_token>]` | `xsec_token` 从 `red search` 结果里的 `xsec_token` 字段拿 |
-| `red check [--keyword]` | 检查 `web_session` 是否还在、是否被降级（`last_web_session`）、最小搜索 |
+| 1 | `goto https://www.xiaohongshu.com/explore`，等 `#search-input` **唯一且可见** |
+| 2 | 用 `HTMLInputElement.prototype.value` 原生 setter 赋值，派发 `input` + `change`，**回读校验** |
+| 3 | 找唯一的 `.search-icon` 并 `click()` |
+| 4 | 等 `location.pathname === '/search_result'`、`?keyword=` 等于关键词，且出现 `section.note-item` 或 `.search-empty-wrapper` |
+| 5 | 滚动收割：`scrollTo(0, scrollHeight)` → 收集卡片 → 按 `note_id` 去重，直到够 `--limit` / `--max-scrolls` 用完 / 连续 2 轮无新增 |
 
-登录态判定：有 `web_session` 且**没有** `last_web_session`；降级/未登录都返回退出码 3。
+可见性判定三层：`getBoundingClientRect` 非零、逐级 `display/visibility/opacity`、排除 `[hidden] [aria-hidden] [inert]` 祖先。
+
+单卡字段：
+
+| 字段 | 来源 |
+|---|---|
+| `note_id` | 卡片内 `a[href*="/search_result/"]` 路径正则 `/(?:search_result\|explore\|note)/([0-9a-f]{24})` |
+| `note_url` | **完整 URL（含 `xsec_token`），必须原样保留** |
+| `title` / `author` / `likes` | 卡片内文本节点，`likes` 用 `count.py` 解析 |
+| `type` | 卡片内有 `.play-icon` 等则 `video` |
+
+> ⚠️ `xsec_token` 是硬约束：详情页**不能只靠 `note_id` 打开**。所以 `search` 输出必须带完整
+> `note_url`，`red note` 也优先接受完整 URL。这是和闲鱼最大的输出差异——闲鱼 `item_id` 自足。
+
+`red note` 是 DOM 提取，**作用域锁死在 `#noteContainer`**，否则会串到右侧推荐流：
+
+| 字段 | 选择器 |
+|---|---|
+| `title` / `desc` | `#detail-title` / `#detail-desc` |
+| `author` | `.username` |
+| `likes` / `collects` / `comments` | `.interact-container` 内 `.like-wrapper .count` / `.collect-wrapper .count` / `.chat-wrapper .count` |
+| `tags` | `#detail-desc a.tag`（去掉开头 `#`） |
+| `images` | `.media-container img` / `.swiper-slide img` |
+
+计数解析：`9776` / `1.2万` / `3亿` / `9.8K` / `1.5M` → 整数；**解析不了返回 `null`，不给 0**。
+
+### 风控
+
+| 类型 | 判据 |
+|---|---|
+| 限速页 | URL 命中 `/website-login/error`、`error_code=300017`、`error_code=300031` |
+| 验证码 | URL 命中 `/website-login/captcha` |
+| 文案 | body 含 `安全限制` / `访问链接异常` / `请求太频繁` / `访问频次异常` |
+| 登录墙 | body 含 `登录后查看` / `请登录`，或 cookie 出现 `last_web_session` |
+
+处理：**冷却 8~18s 随机，重载一次，再挡就退出码 4**。写成一个 `if`，绝不写成 loop。
+
+节奏：详情页 settle 2~5s 随机（闲鱼 1~3s）；搜索页只在滚动间停 1~2s。
 
 ## 排障
 
@@ -144,6 +194,8 @@ stderr  →  进度 / 重试 / 风控告警
 | `登录态失效` | `unb` / `tracknick` 过期，在那台浏览器上重新登录 |
 | `页面未就绪` | 8~12s 内 mtop SDK 没出现，通常是网络慢或未真正加载完；重跑一次 |
 | 小红书 `error: AUTH_REQUIRED` 且提示「登录态已被风控降级」 | `web_session` 被挪到 `last_web_session`，去浏览器重新登录 |
+| 小红书 `STRUCTURE`（退出码 5） | 页面改版导致选择器失效；先 `check --site red` 看 `#search-input` 是否还在 |
+| 小红书 `TIMEOUT::接口超时` / `300011` | 别调接口。这是账号级风控，等冷却并重新登录，只走 `red search` / `red note` |
 
 ## 目录
 
@@ -159,15 +211,16 @@ fishbook/
     mtop_search.js    页面内 JS，参数用 __KEY__ 占位
     mtop_detail.js
   sites/red/
-    web.py            SSR 导航 / 登录态判定 / __INITIAL_STATE__ 解包
-    search.py         搜索：读首屏 SSR
-    item.py           笔记详情：读详情页 SSR
-    unwrap.js         解 Vue ref
-    search_state.js   搜索页取数 JS
-    note_state.js     详情页取数 JS
+    web.py            导航 + 就绪轮询 + 登录态判定 + settle
+    search.js         页面内：输入 + 点击 + 滚动 + 收割
+    note.js           页面内：作用域提取 #noteContainer
+    count.py          "1.2万" → 12000
+    risk.py           风控识别 + 单次冷却重试
+    search.py         搜索编排
+    note.py           详情编排
   util.py             日志 / 抖动 / 数字归一
 ```
 
 ## 加站点
 
-仿 `sites/xy/`（API 驱动）或 `sites/red/`（SSR 驱动）新建目录，在 `cli.py` 的 `DOMAINS` 里登记域名即可。
+仿 `sites/xy/`（借站点 SDK）或 `sites/red/`（点页面 + DOM）新建目录，在 `cli.py` 的 `DOMAINS` 里登记域名即可。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import sys
 import time
@@ -28,3 +29,10 @@ def number(value):
             except ValueError:
                 return value
     return value
+
+
+def render(template: str, **values) -> str:
+    """把 __KEY__ 占位符换成 JSON 字面量，避免手写转义。"""
+    for key, value in values.items():
+        template = template.replace(f"__{key}__", json.dumps(value, ensure_ascii=False))
+    return template
