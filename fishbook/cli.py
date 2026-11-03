@@ -1,4 +1,4 @@
-"""命令行入口：check / xy search / xy item。"""
+"""命令行入口：check / xy search|item / red search|item|check。"""
 
 from __future__ import annotations
 
@@ -10,11 +10,14 @@ import sys
 from . import cdp
 from .cdp import MTOP_READY_JS
 from .errors import EXIT_ENDPOINT, EXIT_OK, EndpointError, FishbookError, UsageError
+from .sites.red import item as red_item
+from .sites.red import search as red_search
+from .sites.red import web as red_web
 from .sites.xy import item as xy_item
 from .sites.xy import search as xy_search
 from .sites.xy.mtop import has_punish_cookie, log
 
-DOMAINS = {"xy": "goofish.com"}
+DOMAINS = {"xy": "goofish.com", "red": "xiaohongshu.com"}
 FORMATS = ("json", "table")
 TITLE_WIDTH = 40
 
@@ -85,6 +88,29 @@ def _search_table(items: list[dict]) -> None:
     )
 
 
+def _red_search_table(notes: list[dict]) -> None:
+    print_table(
+        [
+            {
+                "note_id": note["note_id"],
+                "liked": note["liked"],
+                "type": note["type"],
+                "title": note["title"],
+                "author": note["author"],
+            }
+            for note in notes
+        ],
+        [
+            ("note_id", "NOTE_ID"),
+            ("liked", "LIKED"),
+            ("type", "TYPE"),
+            ("title", "TITLE"),
+            ("author", "AUTHOR"),
+        ],
+        {"title": TITLE_WIDTH},
+    )
+
+
 def _item_table(item: dict) -> None:
     seller = item.get("seller") or {}
     for key, value in item.items():
@@ -122,15 +148,8 @@ def open_target(args, site: str = "xy") -> cdp.CDP:
 # ---------- 子命令 ----------
 
 
-def cmd_check(args) -> int:
-    raw = args.cdp or os.environ.get("FISHBOOK_CDP") or None
-    base, ws_url = cdp.normalize_endpoint(raw)
-    checks: list[dict] = []
-
-    def record(name: str, ok: bool, detail: str = "") -> None:
-        checks.append({"check": name, "ok": bool(ok), "detail": detail})
-        print(f"{'✓' if ok else '✗'} {name}: {detail}", file=sys.stderr, flush=True)
-
+def _check_head(base, ws_url, record, site: str) -> str:
+    """端点 + page target 的通用检查，返回要连接的 ws 地址。"""
     version = cdp.http_get_json(base, "/json/version")
     record("端点连通", True, version.get("Browser") or base)
 
@@ -138,14 +157,31 @@ def cmd_check(args) -> int:
     record("page target", bool(pages), f"{len(pages)} 个")
     for target in pages:
         print(f"    - {target.get('url')}", file=sys.stderr)
+    if ws_url:
+        return ws_url
 
-    if not ws_url:
-        matched = [t for t in pages if DOMAINS["xy"] in (t.get("url") or "")]
-        chosen = matched[0] if matched else (pages[0] if pages else None)
-        if chosen is None or not chosen.get("webSocketDebuggerUrl"):
-            raise EndpointError("没有任何可用的 page target")
-        ws_url = chosen["webSocketDebuggerUrl"]
-        print(f"    选中: {chosen.get('url')}", file=sys.stderr)
+    matched = [t for t in pages if DOMAINS[site] in (t.get("url") or "")]
+    chosen = matched[0] if matched else (pages[0] if pages else None)
+    if chosen is None or not chosen.get("webSocketDebuggerUrl"):
+        raise EndpointError("没有任何可用的 page target")
+    print(f"    选中: {chosen.get('url')}", file=sys.stderr)
+    return chosen["webSocketDebuggerUrl"]
+
+
+def _record_factory(checks: list[dict]):
+    def record(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+        print(f"{'✓' if ok else '✗'} {name}: {detail}", file=sys.stderr, flush=True)
+
+    return record
+
+
+def cmd_check(args) -> int:
+    raw = args.cdp or os.environ.get("FISHBOOK_CDP") or None
+    base, ws_url = cdp.normalize_endpoint(raw)
+    checks: list[dict] = []
+    record = _record_factory(checks)
+    ws_url = _check_head(base, ws_url, record, "xy")
 
     page = cdp.CDP(ws_url).connect()
     try:
@@ -213,6 +249,59 @@ def cmd_xy_item(args) -> int:
     return emit_ok(detail, args.format, _item_table)
 
 
+def cmd_red_search(args) -> int:
+    page = open_target(args, "red")
+    try:
+        notes = red_search.run(page, args.keyword, limit=args.limit)
+    finally:
+        page.close()
+    return emit_ok(notes, args.format, _red_search_table)
+
+
+def cmd_red_item(args) -> int:
+    page = open_target(args, "red")
+    try:
+        note = red_item.run(page, args.note_id, args.token)
+    finally:
+        page.close()
+    return emit_ok(note, args.format, _item_table)
+
+
+def cmd_red_check(args) -> int:
+    raw = args.cdp or os.environ.get("FISHBOOK_CDP") or None
+    base, ws_url = cdp.normalize_endpoint(raw)
+    checks: list[dict] = []
+    record = _record_factory(checks)
+    ws_url = _check_head(base, ws_url, record, "red")
+
+    page = cdp.CDP(ws_url).connect()
+    try:
+        current = page.url()
+        record("当前 URL", bool(current), current)
+        names = red_web.cookie_names(page)
+        record(
+            "cookie web_session",
+            "web_session" in names,
+            "存在" if "web_session" in names else "缺失",
+        )
+        # 出现 last_web_session 说明登录态被风控降级过，需要重新登录
+        demoted = "last_web_session" in names
+        record("登录态未降级", not demoted, "被降级（需重新登录）" if demoted else "正常")
+
+        if args.keyword:
+            try:
+                notes = red_search.run(page, args.keyword, limit=5)
+                record("最小搜索", bool(notes), f"{len(notes)} 条（keyword={args.keyword}）")
+            except FishbookError as exc:
+                record("最小搜索", False, exc.message)
+    finally:
+        page.close()
+
+    ok = all(check["ok"] for check in checks)
+    print(json.dumps({"ok": ok, "data": {"checks": checks}}, ensure_ascii=False))
+    return EXIT_OK if ok else EXIT_ENDPOINT
+
+
 # ---------- 入口 ----------
 
 
@@ -247,6 +336,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     item = xy_sub.add_parser("item", help="商品详情")
     item.add_argument("item_id")
+
+    red = sub.add_parser("red", help="小红书")
+    red_sub = red.add_subparsers(dest="red_command", required=True)
+
+    red_search_parser = red_sub.add_parser("search", help="关键词搜索（SSR 首屏）")
+    red_search_parser.add_argument("keyword")
+    red_search_parser.add_argument("--limit", type=int, default=20, help="条数上限（默认 20）")
+
+    red_item_parser = red_sub.add_parser("item", help="笔记详情")
+    red_item_parser.add_argument("note_id")
+    red_item_parser.add_argument("--token", default="", help="xsec_token（从 search 结果里拿）")
+
+    red_check = red_sub.add_parser("check", help="自检：端点 / target / 登录态 / 最小搜索")
+    red_check.add_argument("--keyword", default="", help="最小搜索用的关键词，留空跳过该步")
     return parser
 
 
@@ -259,6 +362,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_xy_search(args)
         if getattr(args, "xy_command", None) == "item":
             return cmd_xy_item(args)
+        if getattr(args, "red_command", None) == "search":
+            return cmd_red_search(args)
+        if getattr(args, "red_command", None) == "item":
+            return cmd_red_item(args)
+        if getattr(args, "red_command", None) == "check":
+            return cmd_red_check(args)
         raise UsageError("未知子命令")
     except FishbookError as exc:
         emit_error(exc)

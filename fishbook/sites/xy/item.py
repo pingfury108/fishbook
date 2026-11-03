@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from ...cdp import CDP
-from .mtop import JS_DIR, call, ensure_ready, number, render
+from ...util import number
+from .mtop import JS_DIR, call, ensure_ready, render
 
 ITEM_URL = "https://www.goofish.com/item?id={item_id}"
 

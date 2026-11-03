@@ -37,6 +37,11 @@ fishbook --cdp 127.0.0.1:9222 xy search "相机" --min-price 1000 --max-price 30
 # 商品详情
 fishbook --cdp 127.0.0.1:9222 xy item 1040754408976
 
+# 小红书：搜索（SSR 首屏）/ 笔记详情 / 自检
+fishbook --cdp 127.0.0.1:9222 red search "macbook"
+fishbook --cdp 127.0.0.1:9222 red item 6ad1ebbd000000001500cab7 --token <xsec_token>
+fishbook --cdp 127.0.0.1:9222 red check
+
 # 人眼查看
 fishbook -f table xy search "macbook"
 ```
@@ -105,6 +110,28 @@ stderr  →  进度 / 重试 / 风控告警
 | `labels` | `itemDO.itemLabelExtList[].text`（分类 / 品牌 / 内存…） |
 | `seller` | `sellerDO`: `nick` `sellerId` `publishCity` `xianyuSummary` `replyRatio24h` `replyInterval` |
 
+## 小红书（red）
+
+不用 API，直接读页面自身 SSR 下来的 `window.__INITIAL_STATE__`，请求量等于普通浏览一次页面。
+
+为什么不用 API：`/api/sns/web/v1/search/notes`、`/api/sns/web/v1/feed` 需要 `X-s` / `X-t` /
+`X-S-Common` 三件套，其中 `X-s`/`X-t` 可由页面里的 `window._webmsxyw(api, payload)` 现算，
+但实测（已签名、已带上真实 `X-S-Common`）仍返回：
+
+```
+{"code":300011,"success":false,"msg":"当前账号存在异常，请切换账号后重试"}
+```
+
+且服务端会把 `web_session` 降级（cookie 里多一个 `last_web_session`），页面变成「登录后查看搜索结果」。
+
+| 子命令 | 说明 |
+|---|---|
+| `red search <kw> [--limit 20]` | 只能拿到 SSR 首屏（实测 ~22 条），翻页需 API，当前环境不可用 |
+| `red item <note_id> [--token <xsec_token>]` | `xsec_token` 从 `red search` 结果里的 `xsec_token` 字段拿 |
+| `red check [--keyword]` | 检查 `web_session` 是否还在、是否被降级（`last_web_session`）、最小搜索 |
+
+登录态判定：有 `web_session` 且**没有** `last_web_session`；降级/未登录都返回退出码 3。
+
 ## 排障
 
 | 症状 | 原因 / 处理 |
@@ -116,6 +143,7 @@ stderr  →  进度 / 重试 / 风控告警
 | `check` 里 `x5sec 痕迹` 显示存在 | 只是惩罚期留的 httpOnly cookie（h5api 域），**不**代表当前一定被拦，仅作限速提醒 |
 | `登录态失效` | `unb` / `tracknick` 过期，在那台浏览器上重新登录 |
 | `页面未就绪` | 8~12s 内 mtop SDK 没出现，通常是网络慢或未真正加载完；重跑一次 |
+| 小红书 `error: AUTH_REQUIRED` 且提示「登录态已被风控降级」 | `web_session` 被挪到 `last_web_session`，去浏览器重新登录 |
 
 ## 目录
 
@@ -130,8 +158,16 @@ fishbook/
     item.py           详情：字段映射
     mtop_search.js    页面内 JS，参数用 __KEY__ 占位
     mtop_detail.js
+  sites/red/
+    web.py            SSR 导航 / 登录态判定 / __INITIAL_STATE__ 解包
+    search.py         搜索：读首屏 SSR
+    item.py           笔记详情：读详情页 SSR
+    unwrap.js         解 Vue ref
+    search_state.js   搜索页取数 JS
+    note_state.js     详情页取数 JS
+  util.py             日志 / 抖动 / 数字归一
 ```
 
 ## 加站点
 
-仿 `sites/xy/` 新建 `sites/red/`，在 `cli.py` 的 `DOMAINS` 里登记域名即可（小红书接口未经实测）。
+仿 `sites/xy/`（API 驱动）或 `sites/red/`（SSR 驱动）新建目录，在 `cli.py` 的 `DOMAINS` 里登记域名即可。
