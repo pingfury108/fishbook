@@ -1,35 +1,42 @@
-"""red search：UI 自动化 —— 输入 → 点击 → 滚动收割卡片。
+"""red search：走页面自身的搜索链路 —— 打开搜索 URL → 滚动收割卡片。
 
 小红书没有可借的 SDK（`X-S-Common` 与浏览器指纹绑定，手工 fetch 会 461/300015），
-所以走页面自身的搜索链路：填输入框、点按钮、滚页面，然后从 `section.note-item` 提字段。
+所以既不自己签名，也不 `evaluate(fetch)`：直接打开 `search_result?keyword=`，
+翻页由页面自己在滚动时用它的签名去请求。
+
+当前版本实测：首页搜索框是 textarea `#search-input-in-feeds`，
+方案里的 `#search-input` 只存在于窄版 header 且 `display:none`，
+所以不走「填输入框 + 点按钮」，改为直接导航（等价于用户点进结果页）。
+
+等待与滚动节奏都在 Python 侧驱动：页面里长等待会被后台标签页的定时器节流，容易挂死一次 evaluate。
 """
 
 from __future__ import annotations
 
+import urllib.parse
 from pathlib import Path
 
 from ...cdp import CDP
-from ...errors import AuthError, RiskError, StructureError, UsageError
-from ...util import log, render
+from ...errors import AuthError, RiskError, UsageError
+from ...util import log
 from . import risk
 from .count import parse_count
-from .web import EXPLORE_URL, goto_and_wait, require_login
+from .web import EXPLORE_URL, SITE_URL, goto_and_wait, require_login, scroll_pause
+
+SEARCH_URL = SITE_URL + "search_result?keyword={q}&source=web_search_result_notes"
 
 JS_DIR = Path(__file__).resolve().parent
-_TEMPLATE = (JS_DIR / "search.js").read_text(encoding="utf-8")
+_HARVEST_JS = (JS_DIR / "harvest.js").read_text(encoding="utf-8")
 
-SEARCH_READY_JS = "document.readyState === 'complete' && !!document.querySelector('#search-input')"
-SEARCH_TIMEOUT = 90.0
+CARDS_READY_JS = """document.readyState === 'complete' && (
+  !!document.querySelector('section.note-item')
+  || !!document.querySelector('.search-empty-wrapper')
+  || /登录后查看|请登录/.test(document.body ? document.body.innerText : '')
+)"""
+RESULT_TIMEOUT = 20.0
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 60
 MAX_SCROLLS = 15
-
-_STRUCT_ERRORS = {
-    "NO_SEARCH_INPUT": "找不到唯一的可见输入框 #search-input",
-    "NO_SEARCH_ICON": "找不到唯一的搜索按钮 .search-icon",
-    "INPUT_SET_FAILED": "输入框赋值后回读不一致（layout 异常）",
-    "SEARCH_TIMEOUT": "点击搜索后 15s 内没出现结果路由或卡片",
-}
 
 
 def map_card(card: dict) -> dict:
@@ -44,12 +51,65 @@ def map_card(card: dict) -> dict:
     }
 
 
-def _evaluate(page: CDP, keyword: str, limit: int, max_scrolls: int) -> dict:
-    js = render(_TEMPLATE, KEYWORD=keyword, LIMIT=limit, MAX_SCROLLS=max_scrolls)
-    result = page.evaluate(js, timeout=SEARCH_TIMEOUT)
-    if not isinstance(result, dict):
-        raise StructureError(f"search.js 返回了非对象结果: {result!r}")
-    return result
+def _harvest(page: CDP) -> dict:
+    result = page.evaluate(_HARVEST_JS, retries=2)
+    return result if isinstance(result, dict) else {}
+
+
+def _collect(page: CDP, seen: dict, snapshot: dict) -> int:
+    added = 0
+    for card in snapshot.get("cards") or []:
+        note_id = card.get("note_id")
+        if note_id and note_id not in seen:
+            seen[note_id] = card
+            added += 1
+    return added
+
+
+def _scroll(page: CDP) -> None:
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)", retries=2)
+
+
+def _search_once(page: CDP, keyword: str, limit: int, max_scrolls: int) -> list[dict]:
+    goto_and_wait(
+        page,
+        SEARCH_URL.format(q=urllib.parse.quote(keyword)),
+        CARDS_READY_JS,
+        timeout=RESULT_TIMEOUT,
+        what="搜索结果卡片 section.note-item",
+    )
+    require_login(page)
+
+    snapshot = _harvest(page)
+    if snapshot.get("risk"):
+        raise RiskError(risk_msg(snapshot["risk"]))
+    if snapshot.get("loginWall"):
+        raise AuthError("小红书要求登录后才能搜索，请在该浏览器里登录")
+    if snapshot.get("empty"):
+        log(f"搜索「{keyword}」没有结果")
+        return []
+
+    seen: dict[str, dict] = {}
+    _collect(page, seen, snapshot)
+    idle = 0
+    for _ in range(max_scrolls):
+        if len(seen) >= limit:
+            break
+        _scroll(page)
+        scroll_pause()
+        snapshot = _harvest(page)
+        if snapshot.get("risk"):
+            raise RiskError(risk_msg(snapshot["risk"]))
+        added = _collect(page, seen, snapshot)
+        idle = 0 if added else idle + 1
+        if idle >= 2:  # 连续 2 轮无新增即停
+            break
+
+    return [map_card(card) for card in list(seen.values())[:limit]]
+
+
+def risk_msg(marker: str) -> str:
+    return f"小红书风控拦截（{marker}），停止本次运行"
 
 
 def run(
@@ -60,26 +120,15 @@ def run(
     if not 1 <= max_scrolls <= MAX_SCROLLS:
         raise UsageError(f"--max-scrolls 需在 1..{MAX_SCROLLS}")
 
-    goto_and_wait(page, EXPLORE_URL, SEARCH_READY_JS, what="搜索输入框 #search-input")
-    require_login(page)
+    risk.guard(page, EXPLORE_URL)
 
-    result = _evaluate(page, keyword, limit, max_scrolls)
+    try:
+        notes = _search_once(page, keyword, limit, max_scrolls)
+    except RiskError as exc:
+        # 命中风控：冷却一次，再跑一遍；还挡就抛出去（绝不循环）
+        log(str(exc))
+        risk.cooldown("search")
+        notes = _search_once(page, keyword, limit, max_scrolls)
 
-    # 命中风控：冷却一次，只重load 一次，再挡就退出（绝不循环重试）
-    if result.get("risk"):
-        risk.cooldown(result["risk"])
-        goto_and_wait(page, EXPLORE_URL, SEARCH_READY_JS, what="搜索输入框 #search-input")
-        result = _evaluate(page, keyword, limit, max_scrolls)
-        if result.get("risk"):
-            raise RiskError(f"小红书风控拦截（{result['risk']}），停止本次运行")
-
-    error = result.get("error")
-    if error == "LOGIN_REQUIRED":
-        raise AuthError("小红书要求登录后才能搜索，请在该浏览器里登录")
-    if error:
-        raise StructureError(_STRUCT_ERRORS.get(error, f"搜索页结构异常: {error}"))
-
-    cards = result.get("cards") or []
-    notes = [map_card(card) for card in cards if card.get("note_id")]
     log(f"搜索「{keyword}」: {len(notes)} 条")
-    return notes[:limit]
+    return notes

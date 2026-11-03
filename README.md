@@ -62,7 +62,7 @@ CDP 地址优先级：`--cdp` > `$FISHBOOK_CDP` > `http://127.0.0.1:9222`。支�
 | 命令 | 追加检查 |
 |---|---|
 | `check --site xy` | `unb` / `tracknick` cookie、`window.lib.mtop` 就绪、x5sec 痕迹（`--keyword` 时加一次最小搜索） |
-| `check --site red` | `web_session` cookie、登录态是否被降级、`#search-input` 是否存在（`--keyword` 时加一次最小搜索） |
+| `check --site red` | `web_session` cookie、页面是否有登录墙、`#search-input` 是否存在（`--keyword` 时加一次最小搜索） |
 
 target 发现：优先选 url 命中 `goofish.com` 的 page target；若只有一个 page target（比如 `chrome://newtab`）就回退到它并由工具导航过去；多个都不匹配则报错并列出。
 
@@ -137,11 +137,17 @@ stderr  →  进度 / 重试 / 风控告警
 
 | 步骤 | 做法 |
 |---|---|
-| 1 | `goto https://www.xiaohongshu.com/explore`，等 `#search-input` **唯一且可见** |
-| 2 | 用 `HTMLInputElement.prototype.value` 原生 setter 赋值，派发 `input` + `change`，**回读校验** |
-| 3 | 找唯一的 `.search-icon` 并 `click()` |
-| 4 | 等 `location.pathname === '/search_result'`、`?keyword=` 等于关键词，且出现 `section.note-item` 或 `.search-empty-wrapper` |
-| 5 | 滚动收割：`scrollTo(0, scrollHeight)` → 收集卡片 → 按 `note_id` 去重，直到够 `--limit` / `--max-scrolls` 用完 / 连续 2 轮无新增 |
+| 1 | `Page.bringToFront`（后台标签页的定时器会被节流，会把等待拖死）+ `Page.navigate` 到 `search_result?keyword=` |
+| 2 | 等 `readyState==='complete'` 且出现 `section.note-item` / `.search-empty-wrapper` / 登录墙 |
+| 3 | 收割当前 DOM 卡片（`harvest.js`），按 `note_id` 去重 |
+| 4 | Python 侧 `window.scrollTo(0, scrollHeight)` → 停 1~2s → 再收割；够 `--limit` / `--max-scrolls` 用完 / 连续 2 轮无新增即停 |
+
+> 实测偏差：方案里的 `#search-input` 在当前版本只存在于窄版 header 且 `display:none`，
+> 首页真正的搜索框是 textarea `#search-input-in-feeds`。所以不模拟输入，直接导航到结果页
+> —— 翻页仍由页面自己在滚动时用它自己的签名发起，脚本不签名、不 `evaluate(fetch)`。
+>
+> 等待和滚动都放在 Python 侧：把一整段带 `await` 的长流程塞进一次 `Runtime.evaluate`
+> 会遇到「点完搜索上下文被销毁 / 后台定时器节流」，promise 永不 settle，只能等 90s 超时。
 
 可见性判定三层：`getBoundingClientRect` 非零、逐级 `display/visibility/opacity`、排除 `[hidden] [aria-hidden] [inert]` 祖先。
 
@@ -154,8 +160,10 @@ stderr  →  进度 / 重试 / 风控告警
 | `title` / `author` / `likes` | 卡片内文本节点，`likes` 用 `count.py` 解析 |
 | `type` | 卡片内有 `.play-icon` 等则 `video` |
 
-> ⚠️ `xsec_token` 是硬约束：详情页**不能只靠 `note_id` 打开**。所以 `search` 输出必须带完整
-> `note_url`，`red note` 也优先接受完整 URL。这是和闲鱼最大的输出差异——闲鱼 `item_id` 自足。
+> ⚠️ `xsec_token` 是硬约束（已实测）：只带 `note_id` 打开会被 302 到
+> `/404?source=/404/sec_xxx&error_code=300031&error_msg=当前笔记暂时无法浏览`。
+> token 有两个来源，按顺序取：卡片内**带 `xsec_token` 的锚点** → `__INITIAL_STATE__.search.feeds[].xsecToken`
+> 兜底拼进 URL。所以 `search` 输出必须带完整 `note_url`，`red note` 也优先接受完整 URL。
 
 `red note` 是 DOM 提取，**作用域锁死在 `#noteContainer`**，否则会串到右侧推荐流：
 
@@ -176,7 +184,7 @@ stderr  →  进度 / 重试 / 风控告警
 | 限速页 | URL 命中 `/website-login/error`、`error_code=300017`、`error_code=300031` |
 | 验证码 | URL 命中 `/website-login/captcha` |
 | 文案 | body 含 `安全限制` / `访问链接异常` / `请求太频繁` / `访问频次异常` |
-| 登录墙 | body 含 `登录后查看` / `请登录`，或 cookie 出现 `last_web_session` |
+| 登录墙 | body 含 `登录后查看` / `请登录`；cookie 里的 `last_web_session` 只作提示（可能是上次降级残留，以页面为准） |
 
 处理：**冷却 8~18s 随机，重载一次，再挡就退出码 4**。写成一个 `if`，绝不写成 loop。
 
@@ -194,7 +202,8 @@ stderr  →  进度 / 重试 / 风控告警
 | `登录态失效` | `unb` / `tracknick` 过期，在那台浏览器上重新登录 |
 | `页面未就绪` | 8~12s 内 mtop SDK 没出现，通常是网络慢或未真正加载完；重跑一次 |
 | 小红书 `error: AUTH_REQUIRED` 且提示「登录态已被风控降级」 | `web_session` 被挪到 `last_web_session`，去浏览器重新登录 |
-| 小红书 `STRUCTURE`（退出码 5） | 页面改版导致选择器失效；先 `check --site red` 看 `#search-input` 是否还在 |
+| 小红书 `STRUCTURE`（退出码 5） | 页面改版导致选择器失效；先 `check --site red` 看 `#search-input` / 卡片是否还在 |
+| 小红书 `NOT_FOUND`（退出码 3）说明缺 `xsec_token` | 用 `red search` 输出里的完整 `note_url`，别只给 `note_id` |
 | 小红书 `TIMEOUT::接口超时` / `300011` | 别调接口。这是账号级风控，等冷却并重新登录，只走 `red search` / `red note` |
 
 ## 目录
@@ -212,7 +221,7 @@ fishbook/
     mtop_detail.js
   sites/red/
     web.py            导航 + 就绪轮询 + 登录态判定 + settle
-    search.js         页面内：输入 + 点击 + 滚动 + 收割
+    harvest.js        页面内：单轮收割卡片 + 风控/底部判定
     note.js           页面内：作用域提取 #noteContainer
     count.py          "1.2万" → 12000
     risk.py           风控识别 + 单次冷却重试

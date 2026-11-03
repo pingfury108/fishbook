@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import random
 import time
 
@@ -23,13 +24,15 @@ def cookie_names(page: CDP) -> set[str]:
 
 
 def require_login(page: CDP) -> None:
+    """只认 web_session；last_web_session 可能是上次降级的残留，仅作提示。
+
+    真正的登录态以页面为准：出现「登录后查看」时由调用方抛 AuthError。
+    """
     names = cookie_names(page)
-    if any(name in names for name in DEMOTED_COOKIES):
-        raise AuthError(
-            "小红书登录态已被风控降级（cookie 出现 last_web_session），请在该浏览器里重新登录后再试"
-        )
     if not all(name in names for name in LOGIN_COOKIES):
         raise AuthError("小红书未登录（缺少 web_session cookie），请在该浏览器里登录")
+    if any(name in names for name in DEMOTED_COOKIES):
+        log("提示：cookie 里有 last_web_session 残留（上次风控降级留下的），以页面状态为准")
 
 
 def wait_js(page: CDP, expr: str, timeout: float = 20.0) -> bool:
@@ -49,6 +52,9 @@ def wait_js(page: CDP, expr: str, timeout: float = 20.0) -> bool:
 def goto_and_wait(
     page: CDP, url: str, ready_js: str, timeout: float = 20.0, what: str = "目标节点"
 ) -> None:
+    # 后台标签页的定时器会被节流，先把该标签拉到前台
+    with contextlib.suppress(CDPError):
+        page.send("Page.bringToFront")
     page.send("Page.navigate", {"url": url})
     if not wait_js(page, ready_js, timeout):
         raise StructureError(f"页面结构不符：{timeout:.0f}s 内未出现{what} —— {url}")

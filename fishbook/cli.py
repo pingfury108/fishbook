@@ -207,9 +207,13 @@ def _check_red(page, record, keyword: str) -> None:
     record(
         "cookie web_session", "web_session" in names, "存在" if "web_session" in names else "缺失"
     )
-    # 出现 last_web_session 说明登录态被风控降级过，需要重新登录
-    demoted = "last_web_session" in names
-    record("登录态未降级", not demoted, "被降级（需重新登录）" if demoted else "正常")
+    # 以页面为准：登录墙文案才说明真的没登录（last_web_session 可能是残留）
+    login_wall = bool(
+        page.evaluate(
+            "!!(document.body && /登录后查看|请登录/.test(document.body.innerText))", retries=2
+        )
+    )
+    record("页面无登录墙", not login_wall, "命中登录墙（需重新登录）" if login_wall else "正常")
 
     has_input = bool(page.evaluate("!!document.querySelector('#search-input')", retries=2))
     record(

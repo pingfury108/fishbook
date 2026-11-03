@@ -10,7 +10,7 @@ from ...errors import AuthError, NotFoundError, StructureError, UsageError
 from ...util import log
 from . import risk
 from .count import parse_count
-from .web import SITE_URL, goto_and_wait, require_login, settle
+from .web import SITE_URL, require_login, settle, wait_js
 
 JS_DIR = Path(__file__).resolve().parent
 _TEMPLATE = (JS_DIR / "note.js").read_text(encoding="utf-8")
@@ -34,6 +34,18 @@ def resolve_url(target: str) -> tuple[str, str]:
     return f"{SITE_URL}explore/{note_id}", note_id
 
 
+def _dedupe_images(urls: list[str]) -> list[str]:
+    """同一张图会以 http/https、不同尺寸出现多次，按去掉协议后的路径去重。"""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for url in urls:
+        key = url.split("://", 1)[-1]
+        if key not in seen:
+            seen.add(key)
+            unique.append(url)
+    return unique
+
+
 def map_note(note_id: str, url: str, data: dict) -> dict:
     return {
         "note_id": note_id,
@@ -46,13 +58,29 @@ def map_note(note_id: str, url: str, data: dict) -> dict:
         "collects": parse_count(data.get("collects_text")),
         "comments": parse_count(data.get("comments_text")),
         "tags": data.get("tags") or [],
-        "images": data.get("images") or [],
+        "images": _dedupe_images(data.get("images") or []),
     }
+
+
+def _raise_redirect(url: str, note_id: str) -> None:
+    """详情页只靠 note_id 打开会被 302 到 /404?error_code=300031。"""
+    if "/404" not in url and "error_code=300031" not in url:
+        return
+    if "/website-login" in url:
+        raise AuthError("小红书要求登录后查看笔记，请在该浏览器里登录")
+    raise NotFoundError(
+        f"笔记无法浏览（缺 xsec_token 或笔记已删除）: {note_id}；"
+        "请用 red search 输出里的完整 note_url 再试"
+    )
 
 
 def run(page: CDP, target: str) -> dict:
     url, note_id = resolve_url(target)
-    goto_and_wait(page, url, NOTE_READY_JS, what="笔记容器 #noteContainer")
+    page.send("Page.navigate", {"url": url})
+    if not wait_js(page, NOTE_READY_JS, 20.0):
+        _raise_redirect(page.url(), note_id)
+        raise StructureError(f"页面结构不符：20s 内未出现笔记容器 #noteContainer —— {url}")
+    _raise_redirect(page.url(), note_id)
     require_login(page)
     risk.guard(page, url)
     settle()  # 详情页比闲鱼敏感：2~5s
