@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fishbook 托管台</title>
+<style>
+  :root {
+    --bg: oklch(0.972 0.004 260);
+    --surface: oklch(1 0 0);
+    --text: oklch(0.24 0.02 260);
+    --text-2: oklch(0.52 0.015 260);
+    --text-3: oklch(0.68 0.01 260);
+    --line: oklch(0.92 0.006 260);
+    --line-strong: oklch(0.86 0.01 260);
+    --accent: oklch(0.52 0.17 258);
+    --accent-hover: oklch(0.47 0.17 258);
+    --accent-weak: oklch(0.96 0.025 258);
+    --ok: oklch(0.58 0.13 152);
+    --ok-weak: oklch(0.96 0.05 152);
+    --danger: oklch(0.55 0.19 27);
+    --danger-weak: oklch(0.96 0.03 27);
+    --warn: oklch(0.68 0.13 80);
+    --warn-weak: oklch(0.97 0.05 90);
+    --radius: 12px;
+    --radius-s: 8px;
+    --shadow: 0 1px 2px oklch(0 0 0 / 0.04), 0 2px 8px oklch(0 0 0 / 0.04);
+    --font: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font-family: var(--font); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+  .app { display: flex; min-height: 100vh; }
+
+  /* ---------- 侧栏 ---------- */
+  .sidebar { width: 216px; flex-shrink: 0; background: var(--surface); border-right: 1px solid var(--line);
+             display: flex; flex-direction: column; padding: 20px 12px; position: sticky; top: 0; height: 100vh; }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 0 10px 18px; }
+  .brand-mark { width: 30px; height: 30px; border-radius: 8px; background: var(--accent); color: #fff;
+                display: grid; place-items: center; font-size: 15px; font-weight: 700; }
+  .brand b { font-size: 15px; letter-spacing: 0.2px; }
+  .brand small { display: block; font-size: 11px; color: var(--text-3); font-weight: 400; }
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav button { display: flex; align-items: center; gap: 10px; border: none; background: none; text-align: left;
+                padding: 9px 12px; border-radius: var(--radius-s); font-size: 13.5px; color: var(--text-2);
+                cursor: pointer; transition: background 0.12s, color 0.12s; }
+  .nav button:hover { background: var(--bg); color: var(--text); }
+  .nav button.on { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
+  .nav .icon { width: 16px; text-align: center; opacity: 0.9; }
+  .sidebar .spacer { flex: 1; }
+  .svc { border-top: 1px solid var(--line); padding: 14px 10px 4px; font-size: 12px; color: var(--text-2); }
+  .svc .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 0; }
+  .svc .dot.ok { background: var(--ok); }
+  .svc .dot.bad { background: var(--danger); }
+
+  /* ---------- 主区 ---------- */
+  main { flex: 1; min-width: 0; padding: 28px 32px 48px; }
+  .page-head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; gap: 16px; }
+  .page-head h2 { margin: 0; font-size: 19px; font-weight: 700; }
+  .page-head p { margin: 4px 0 0; color: var(--text-2); font-size: 13px; }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+           box-shadow: var(--shadow); overflow: hidden; }
+  .panel + .panel { margin-top: 16px; }
+  .panel-head { padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
+  .panel-head b { font-size: 13.5px; }
+  .panel-body { padding: 16px 18px; }
+
+  /* ---------- 按钮 ---------- */
+  .btn { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--radius-s); border: 1px solid var(--line-strong);
+         background: var(--surface); color: var(--text); padding: 6px 13px; font-size: 13px; cursor: pointer;
+         transition: background 0.12s, border-color 0.12s, color 0.12s; font-family: inherit; }
+  .btn:hover { border-color: var(--text-3); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent-hover); }
+  .btn.danger { color: var(--danger); border-color: oklch(0.86 0.05 27); }
+  .btn.danger:hover { background: var(--danger-weak); }
+  .btn.sm { padding: 3px 9px; font-size: 12px; border-radius: 7px; }
+  .btn:disabled { opacity: 0.55; cursor: default; }
+
+  /* toggle 组 */
+  .toggles { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tg { border: 1px solid var(--line-strong); background: var(--surface); color: var(--text-2);
+        padding: 3px 10px; border-radius: 999px; font-size: 12px; cursor: pointer; font-family: inherit;
+        transition: all 0.12s; }
+  .tg:hover { border-color: var(--text-3); }
+  .tg.on { background: var(--accent-weak); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .tg.on.green { background: var(--ok-weak); border-color: var(--ok); color: var(--ok); }
+  .tg.on.amber { background: var(--warn-weak); border-color: var(--warn); color: oklch(0.45 0.1 80); }
+
+  /* ---------- 徽标 ---------- */
+  .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 600; padding: 2px 8px;
+           border-radius: 999px; background: var(--bg); color: var(--text-2); }
+  .badge.blue { background: var(--accent-weak); color: var(--accent); }
+  .badge.green { background: var(--ok-weak); color: var(--ok); }
+  .badge.red { background: var(--danger-weak); color: var(--danger); }
+  .badge.amber { background: var(--warn-weak); color: oklch(0.45 0.1 80); }
+  .badge.gray { background: var(--bg); color: var(--text-2); }
+
+  /* ---------- 商品行卡 ---------- */
+  .item-row { display: flex; align-items: center; gap: 16px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .item-row:last-child { border-bottom: none; }
+  .item-row:hover { background: oklch(0.985 0.003 260); }
+  .item-main { flex: 1; min-width: 0; }
+  .item-title { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item-meta { font-size: 12px; color: var(--text-3); margin-top: 5px; display: flex; align-items: center; gap: 10px; }
+  .item-meta .id { font-family: var(--mono); }
+  .item-price { font-weight: 700; font-size: 15px; color: oklch(0.5 0.12 30); white-space: nowrap;
+                min-width: 82px; text-align: right; font-variant-numeric: tabular-nums; }
+  .item-ops { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  .item-ops .sep { width: 1px; height: 18px; background: var(--line); }
+
+  /* ---------- 会话 ---------- */
+  .conv-row { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .conv-row:hover { background: oklch(0.985 0.003 260); }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--accent-weak); color: var(--accent);
+            display: grid; place-items: center; font-size: 14px; font-weight: 700; flex-shrink: 0; }
+  .conv-main { flex: 1; min-width: 0; }
+  .conv-name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+  .conv-preview { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+
+  /* ---------- 消息流 ---------- */
+  .msg { margin: 6px 0; padding: 7px 12px; border-radius: 10px; max-width: 78%; font-size: 13px; width: fit-content; }
+  .msg.in { background: var(--bg); border: 1px solid var(--line); }
+  .msg.out { background: var(--accent-weak); margin-left: auto; }
+  .msg.dry { background: var(--warn-weak); margin-left: auto; border: 1px dashed var(--warn); }
+  .msg .tagline { display: block; font-size: 10.5px; color: var(--text-3); margin-bottom: 2px; }
+
+  /* ---------- 表单 ---------- */
+  label { display: block; font-size: 12.5px; color: var(--text-2); margin: 14px 0 5px; font-weight: 500; }
+  input, textarea, select { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--radius-s);
+                            padding: 8px 11px; font-size: 13px; font-family: inherit; color: var(--text);
+                            background: var(--surface); transition: border-color 0.12s; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  textarea { min-height: 68px; resize: vertical; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  /* ---------- 对话框 ---------- */
+  dialog { border: none; border-radius: 14px; width: min(680px, 92vw); padding: 0;
+           box-shadow: 0 12px 40px oklch(0 0 0 / 0.18); }
+  dialog::backdrop { background: oklch(0 0 0 / 0.35); }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px;
+              border-bottom: 1px solid var(--line); }
+  .dlg-head b { font-size: 15px; }
+  .dlg-body { padding: 18px 20px; max-height: 62vh; overflow: auto; }
+  .dlg-foot { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* 发现列表 */
+  .disc-row { display: flex; align-items: center; gap: 14px; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+  .disc-row:last-child { border-bottom: none; }
+  .disc-main { flex: 1; min-width: 0; }
+  .disc-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .disc-meta { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); margin-top: 2px; }
+
+  /* ---------- 其他 ---------- */
+  .empty { text-align: center; color: var(--text-3); padding: 36px 0; font-size: 13px; }
+  .muted { color: var(--text-3); font-size: 12px; }
+  .banner { display: none; background: var(--danger-weak); color: var(--danger); border-bottom: 1px solid oklch(0.9 0.04 27);
+            padding: 9px 32px; font-size: 13px; }
+  .banner button { margin-left: 10px; }
+  #toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+           padding: 9px 18px; border-radius: 999px; font-size: 13px; opacity: 0; pointer-events: none;
+           transition: opacity 0.2s; z-index: 50; }
+  #toast.show { opacity: 1; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line-strong);
+          border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">鱼</div>
+      <div><b>fishbook</b><small>闲鱼托管台</small></div>
+    </div>
+    <nav class="nav">
+      <button data-v="items" class="on"><span class="icon">◫</span>商品托管</button>
+      <button data-v="convs"><span class="icon">◌</span>会话</button>
+      <button data-v="settings"><span class="icon">⚙</span>设置</button>
+    </nav>
+    <div class="spacer"></div>
+    <div class="svc">
+      <span class="dot ok" id="svcDot"></span><span id="svcText">服务运行中</span>
+      <div class="muted" style="margin-top:4px" id="svcMeta"></div>
+    </div>
+  </aside>
+
+  <div style="flex:1; min-width:0; display:flex; flex-direction:column;">
+    <div class="banner" id="banner">
+      已熔断暂停：所有自动动作已停止。<button class="btn sm" onclick="guard(false)">恢复运行</button>
+    </div>
+    <main id="main" style="flex:1"></main>
+  </div>
+</div>
+
+<dialog id="dlg"><div id="dlgBody"></div></dialog>
+<div id="toast"></div>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let VIEW = "items";
+let toastTimer = null;
+
+function toast(text) {
+  const el = $("#toast");
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+async function refresh() {
+  let st;
+  try { st = await api("/api/status"); }
+  catch { $("#svcDot").className = "dot bad"; $("#svcText").textContent = "服务离线"; return; }
+  $("#svcDot").className = "dot " + (st.paused ? "bad" : "ok");
+  $("#svcText").textContent = st.paused ? "已熔断暂停" : "服务运行中";
+  $("#banner").style.display = st.paused ? "block" : "none";
+  $("#svcMeta").textContent = `商品 ${st.items.length} · 会话 ${st.conversations.length}`;
+  if (VIEW === "items") renderItems(st);
+  else if (VIEW === "convs") renderConvs(st);
+  else renderSettings(st);
+}
+
+/* ============ 商品托管 ============ */
+
+function itemToggles(it) {
+  return `<div class="toggles">
+    <button class="tg ${it.managed ? "on" : ""}" onclick="toggle('${it.item_id}','managed',${it.managed ? 0 : 1})">${it.managed ? "接管中" : "未接管"}</button>
+    <button class="tg ${it.auto_reply ? "on green" : ""}" onclick="toggle('${it.item_id}','auto_reply',${it.auto_reply ? 0 : 1})">自动回复</button>
+    <button class="tg ${it.auto_ship ? "on amber" : ""}" onclick="toggle('${it.item_id}','auto_ship',${it.auto_ship ? 0 : 1})">自动发货</button>
+    <button class="tg ${it.dry_run ? "on amber" : ""}" onclick="toggle('${it.item_id}','dry_run',${it.dry_run ? 0 : 1})">${it.dry_run ? "演练" : "实发"}</button>
+  </div>`;
+}
+
+function renderItems(st) {
+  const rows = st.items.map((it) => `
+    <div class="item-row">
+      <div class="item-main">
+        <div class="item-title">${esc(it.title || "（无标题）")}</div>
+        <div class="item-meta">
+          <span class="id">${esc(it.item_id)}</span>
+          ${it.managed ? (it.dry_run ? '<span class="badge amber">演练中 · 不实际发送</span>' : '<span class="badge green">实发模式</span>') : '<span class="badge">未接管</span>'}
+          ${it.auto_ship ? '<span class="badge blue">自动发货</span>' : ''}
+        </div>
+      </div>
+      <div class="item-price">${it.price ? "¥" + esc(it.price) : ""}</div>
+      <div class="item-ops">
+        ${itemToggles(it)}
+        <div class="sep"></div>
+        <button class="btn sm" onclick="editItem('${it.item_id}')">配置</button>
+      </div>
+    </div>`).join("");
+
+  $("#main").innerHTML = `
+    <div class="page-head">
+      <div><h2>商品托管</h2><p>接管后 agent 才会代你回复买家；新接管商品默认演练模式，确认无误再切实发。</p></div>
+      <div style="display:flex; gap:8px">
+        <button class="btn" onclick="discoverDialog()">从我的发布获取</button>
+        <button class="btn primary" onclick="manualAddDialog()">手动添加</button>
+      </div>
+    </div>
+    <div class="panel">
+      ${rows || '<div class="empty">还没有托管商品<br><span class="muted">点右上角「从我的发布获取」，勾选要托管的商品</span></div>'}
+    </div>`;
+}
+
+async function toggle(id, field, value) {
+  try {
+    await api("/api/items/" + id, { method: "POST", body: JSON.stringify({ [field]: value }) });
+    toast(field === "managed" ? (value ? "已接管" : "已停止接管") : "已更新");
+  } catch (e) { toast("失败: " + e.message); }
+  refresh();
+}
+
+function manualAddDialog() {
+  $("#dlgBody").innerHTML = `
+    <div class="dlg-head"><b>手动添加商品</b><button class="btn sm" onclick="$('#dlg').close()">✕</button></div>
+    <div class="dlg-body">
+      <label>商品 ID *</label><input id="m_id" placeholder="例如 1073564275249">
+      <div class="form-row">
+        <div><label>标题</label><input id="m_title" placeholder="可选"></div>
+        <div><label>价格</label><input id="m_price" placeholder="可选"></div>
+      </div>
+    </div>
+    <div class="dlg-foot"><button class="btn primary" onclick="manualAdd()">添加</button></div>`;
+  $("#dlg").showModal();
+}
+
+async function manualAdd() {
+  const id = $("#m_id").value.trim();
+  if (!id) return toast("商品 ID 必填");
+  await api("/api/items", { method: "POST", body: JSON.stringify({ item_id: id, title: $("#m_title").value, price: $("#m_price").value }) });
+  $("#dlg").close();
+  toast("已添加");
+  refresh();
+}
+
+async function discoverDialog() {
+  $("#dlgBody").innerHTML = `
+    <div class="dlg-head"><b>从「我发布的」获取在售商品</b><button class="btn sm" onclick="$('#dlg').close()">✕</button></div>
+    <div class="dlg-body"><div class="empty"><span class="spin"></span>&nbsp; 正在打开闲鱼个人页并读取在售列表…<br>
+      <span class="muted">首次会新开一个浏览器标签，约 8~15 秒</span></div></div>`;
+  $("#dlg").showModal();
+  try {
+    const r = await api("/api/items/discover");
+    const rows = r.items.map((it) => `
+      <div class="disc-row">
+        <div class="disc-main">
+          <div class="disc-title">${esc(it.title)}</div>
+          <div class="disc-meta">${esc(it.item_id)}${it.price ? " · ¥" + esc(it.price) : ""}</div>
+        </div>
+        ${it.added ? '<span class="badge blue">已添加</span>'
+                   : `<button class="btn sm primary" onclick="addDiscovered(this, '${it.item_id}', '${esc(it.title).replace(/'/g, "&#39;")}', '${esc(it.price)}')">添加</button>`}
+      </div>`).join("");
+    $("#dlgBody").innerHTML = `
+      <div class="dlg-head"><b>在售商品（${r.items.length}）</b><button class="btn sm" onclick="$('#dlg').close()">✕</button></div>
+      <div class="dlg-body">${rows || '<div class="empty">没有读到在售商品</div>'}
+        <p class="muted" style="margin-bottom:0">添加后可在商品列表里开启接管与自动发货。</p></div>
+      <div class="dlg-foot"><button class="btn" onclick="$('#dlg').close()">关闭</button></div>`;
+  } catch (e) {
+    $("#dlgBody").innerHTML = `
+      <div class="dlg-head"><b>获取失败</b><button class="btn sm" onclick="$('#dlg').close()">✕</button></div>
+      <div class="dlg-body"><div class="empty">${esc(e.message)}<br><span class="muted">确认浏览器里能正常打开 goofish.com/personal</span></div></div>`;
+  }
+}
+
+async function addDiscovered(btn, id, title, price) {
+  btn.disabled = true;
+  try {
+    await api("/api/items", { method: "POST", body: JSON.stringify({ item_id: id, title, price }) });
+    btn.outerHTML = '<span class="badge blue">已添加</span>';
+    toast("已添加 " + id);
+  } catch (e) { btn.disabled = false; toast("失败: " + e.message); }
+}
+
+async function editItem(id) {
+  const st = await api("/api/status");
+  const it = st.items.find((x) => x.item_id === id) || {};
+  const pool = await api("/api/items/" + id + "/pool");
+  $("#dlgBody").innerHTML = `
+    <div class="dlg-head"><b>配置 ${esc(id)}</b><button class="btn sm" onclick="$('#dlg').close()">✕</button></div>
+    <div class="dlg-body">
+      <label>话术 / 人设（客服 agent 的商品说明与语气）</label>
+      <textarea id="f_prompt">${esc(it.prompt)}</textarea>
+      <label>FAQ（JSON 数组：[{"k":"关键词|关键词","a":"回复话术"}]）</label>
+      <textarea id="f_faq">${esc(it.faq || "[]")}</textarea>
+      <div class="form-row">
+        <div><label>议价底线（元，低于不卖）</label><input id="f_floor" value="${esc(it.price_floor)}"></div>
+        <div><label>低于底线的话术</label><input id="f_floor_reply" value="${esc(it.floor_reply)}"></div>
+      </div>
+      <label>发货文案模板（{secret} 为卡密占位，仅自动发货时使用）</label>
+      <textarea id="f_ship">${esc(it.ship_note)}</textarea>
+      <label>卡密池（每行一条，追加导入）· 未用 ${pool.unused} / 共 ${pool.total}</label>
+      <textarea id="f_secrets" placeholder="ABC-123&#10;DEF-456"></textarea>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" onclick="$('#dlg').close()">取消</button>
+      <button class="btn primary" onclick="saveItem('${id}')">保存</button>
+    </div>`;
+  $("#dlg").showModal();
+}
+
+async function saveItem(id) {
+  await api("/api/items/" + id, { method: "POST", body: JSON.stringify({
+    prompt: $("#f_prompt").value, faq: $("#f_faq").value,
+    price_floor: $("#f_floor").value, floor_reply: $("#f_floor_reply").value,
+    ship_note: $("#f_ship").value }) });
+  const secrets = $("#f_secrets").value.trim();
+  if (secrets) {
+    const r = await api("/api/items/" + id + "/secrets", { method: "POST", body: JSON.stringify({ contents: secrets }) });
+    toast(`已保存 · 卡密 +${r.added}`);
+  } else toast("已保存");
+  $("#dlg").close();
+  refresh();
+}
+
+/* ============ 会话 ============ */
+
+async function renderConvs(st) {
+  const items = st.items;
+  const rows = st.conversations.map((c) => {
+    const modeBadge = c.mode === "manual" ? '<span class="badge red">人工</span>' : '<span class="badge green">自动</span>';
+    const unreadBadge = c.unread ? `<span class="badge blue">${c.unread} 未读</span>` : "";
+    const item = items.find((x) => x.item_id === c.item_id);
+    return `
+    <div class="conv-row" onclick="openChat('${esc(c.name)}')">
+      <div class="avatar">${esc(c.name.slice(0, 1))}</div>
+      <div class="conv-main">
+        <div class="conv-name">${esc(c.name)} ${modeBadge} ${unreadBadge}</div>
+        <div class="conv-preview">${esc(c.last_msg || "（暂无消息）")}</div>
+      </div>
+      <div>${item ? `<span class="badge">${esc((item.title || item.item_id).slice(0, 14))}</span>` : '<span class="badge gray">未关联</span>'}</div>
+    </div>`;
+  }).join("");
+
+  const itemOpts = items.map((i) => `<option value="${esc(i.item_id)}">${esc((i.title || i.item_id).slice(0, 24))}</option>`).join("");
+  $("#main").innerHTML = `
+    <div class="page-head">
+      <div><h2>会话</h2><p>轮询间隔 25~45 秒；会话需关联到「接管中」的商品才会被 agent 接管。</p></div>
+    </div>
+    <div class="panel">${rows || '<div class="empty">暂无会话<br><span class="muted">买家来信后会出现在这里</span></div>'}</div>
+    <div class="panel">
+      <div class="panel-head"><b>关联会话 → 商品</b></div>
+      <div class="panel-body">
+        <div class="form-row" style="grid-template-columns: 1fr 1fr auto; align-items:end">
+          <div><label>买家昵称</label><input id="convName" placeholder="与 IM 会话列表显示一致"></div>
+          <div><label>托管商品</label><select id="convItem">${itemOpts || "<option>（先去添加商品）</option>"}</select></div>
+          <button class="btn primary" onclick="assign()">关联</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function assign() {
+  const name = $("#convName").value.trim();
+  if (!name) return toast("买家昵称必填");
+  await api("/api/conversations/" + encodeURIComponent(name) + "/item",
+    { method: "POST", body: JSON.stringify({ item_id: $("#convItem").value }) });
+  toast("已关联");
+  refresh();
+}
+
+async function setMode(name, mode) {
+  await api("/api/conversations/" + encodeURIComponent(name) + "/mode", { method: "POST", body: JSON.stringify({ mode }) });
+  toast(mode === "manual" ? "已切人工，agent 停止介入" : "已切自动");
+  refresh();
+}
+
+async function openChat(name) {
+  const msgs = await api("/api/messages/" + encodeURIComponent(name));
+  const st = await api("/api/status");
+  const conv = st.conversations.find((c) => c.name === name) || {};
+  const flow = msgs.map((m) => {
+    const who = m.direction === "in" ? "买家" : m.direction === "dry" ? "拟发送（演练）" : "我";
+    const cls = m.direction;
+    const body = m.content || `（${esc(m.decision)} · ${esc(m.detail || "")}）`;
+    return `<div class="msg ${cls}"><span class="tagline">${who} · ${esc(m.decision || "")}</span>${esc(body)}</div>`;
+  }).join("");
+  const itemOpts = st.items.map((i) =>
+    `<option value="${esc(i.item_id)}" ${i.item_id === conv.item_id ? "selected" : ""}>${esc((i.title || i.item_id).slice(0, 22))}</option>`).join("");
+  $("#dlgBody").innerHTML = `
+    <div class="dlg-head">
+      <b>${esc(name)}</b>
+      <div style="display:flex; gap:6px; align-items:center">
+        ${conv.mode === "manual" ? '<span class="badge red">人工</span>' : '<span class="badge green">自动</span>'}
+        <button class="btn sm" onclick="setMode('${esc(name)}','${conv.mode === "auto" ? "manual" : "auto"}')">${conv.mode === "auto" ? "转人工" : "转自动"}</button>
+        <button class="btn sm" onclick="$('#dlg').close()">✕</button>
+      </div>
+    </div>
+    <div class="dlg-body">
+      <div style="max-height:46vh; overflow:auto">${flow || '<div class="empty">暂无消息记录</div>'}</div>
+      <label>关联到商品</label>
+      <select id="chatItem" onchange="reassign('${esc(name)}')"><option value="">（未关联）</option>${itemOpts}</select>
+    </div>
+    <div class="dlg-foot" style="justify-content:stretch; gap:8px">
+      <input id="chatText" placeholder="手动回复（发送后该会话转人工）" style="flex:1"
+             onkeydown="if(event.key==='Enter')manualSend('${esc(name)}')">
+      <button class="btn primary" onclick="manualSend('${esc(name)}')">发送</button>
+    </div>`;
+  $("#dlg").showModal();
+}
+
+async function reassign(name) {
+  await api("/api/conversations/" + encodeURIComponent(name) + "/item",
+    { method: "POST", body: JSON.stringify({ item_id: $("#chatItem").value }) });
+  toast("已关联");
+}
+
+async function manualSend(name) {
+  const text = $("#chatText").value.trim();
+  if (!text) return;
+  try {
+    await api("/api/conversations/" + encodeURIComponent(name) + "/send", { method: "POST", body: JSON.stringify({ text }) });
+    toast("已发送，会话转人工");
+    openChat(name);
+  } catch (e) { toast("失败: " + e.message); }
+}
+
+/* ============ 设置 ============ */
+
+function renderSettings(st) {
+  $("#main").innerHTML = `
+    <div class="page-head"><div><h2>设置</h2><p>LLM 与安全护栏。</p></div></div>
+    <div class="panel">
+      <div class="panel-head"><b>DeepSeek 客服引擎</b>
+        ${st.api_key_set ? '<span class="badge green">Key 已配置</span>' : '<span class="badge red">未配置 · LLM 消息将转人工</span>'}</div>
+      <div class="panel-body">
+        <label>API Key ${st.api_key_set ? "（留空保持不变）" : ""}</label>
+        <input id="s_key" type="password" placeholder="sk-...">
+        <div class="form-row">
+          <div><label>模型</label><input id="s_model" value="${esc(st.settings.model || "deepseek-chat")}"></div>
+          <div><label>店铺名（写进 prompt）</label><input id="s_shop" value="${esc(st.settings.shop || "")}"></div>
+        </div>
+        <div style="margin-top:16px"><button class="btn primary" onclick="saveSettings()">保存设置</button></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><b>安全护栏</b></div>
+      <div class="panel-body">
+        <p class="muted" style="margin-top:0">
+          每日发送上限 200 条 · 回复间隔 3~9s 随机 · 发货按会话幂等（一个会话只自动发一次）·
+          回复含手机号/链接自动拦截转人工 · 新接管商品默认演练模式。
+        </p>
+        <button class="btn ${st.paused ? "" : "danger"}" onclick="guard(${st.paused ? "false" : "true"})">
+          ${st.paused ? "恢复运行" : "立即熔断暂停"}
+        </button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><b>调试</b></div>
+      <div class="panel-body">
+        <button class="btn" onclick="api('/api/watch/trigger',{method:'POST'}).then(()=>{toast('已扫描一轮');refresh()})">立即扫描一轮</button>
+        <span class="muted" style="margin-left:10px">扫描读取 IM 会话列表并处理新消息（演练模式下不发送）。</span>
+      </div>
+    </div>`;
+}
+
+async function saveSettings() {
+  const body = {};
+  if ($("#s_key").value) body.api_key = $("#s_key").value;
+  body.model = $("#s_model").value;
+  body.shop = $("#s_shop").value;
+  await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
+  toast("已保存");
+  refresh();
+}
+
+async function guard(paused) {
+  await api("/api/guard", { method: "POST", body: JSON.stringify({ paused }) });
+  toast(paused ? "已熔断，自动动作停止" : "已恢复运行");
+  refresh();
+}
+
+/* ============ 启动 ============ */
+document.querySelectorAll(".nav button").forEach((b) => (b.onclick = () => {
+  document.querySelectorAll(".nav button").forEach((x) => x.classList.remove("on"));
+  b.classList.add("on");
+  VIEW = b.dataset.v;
+  refresh();
+}));
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

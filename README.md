@@ -230,6 +230,41 @@ fishbook/
   util.py             日志 / 抖动 / 数字归一
 ```
 
+## 托管服务（serve）
+
+```bash
+fishbook --cdp 127.0.0.1:9222 serve          # Web UI: http://127.0.0.1:8756
+fishbook --cdp ... serve --poll-min 30 --poll-max 60 --state .fishbook/state.db
+```
+
+常驻进程：轮询闲鱼 IM 页 DOM（25~45s 随机）→ 新消息走客服 agent → 自动回复；买家付款意图 + 自动发货开关 → 从卡密池取一条发给买家。
+
+| 原则 | 实现 |
+|---|---|
+| 不碰 IM 接口 | 会话/消息/发送全部走页面 DOM（点开会话、原生 setter 打字、点发送、回读校验），请求量=人工使用 |
+| 演练优先 | 新托管商品默认 dry-run：决策链全跑、消息只入审计不发送；UI 上可切「实发」 |
+| 决策管线 | 敏感词闸门（退款/投诉/线下交易→转人工）→ FAQ 命中直回 → 议价底线 → LLM(DeepSeek, JSON 输出) → 回复校验（手机号/链接拦截） |
+| 发货不经 LLM | LLM 只判断意图；卡密由订单确定性触发，一个会话只自动发一次（幂等） |
+| 页面单线程 | BrowserWorker：所有浏览器读/写在单线程队列里串行（CDP 页面端点单客户端 + UI 自动化不能并发） |
+| 人工优先 | UI 一键转人工；手动发送的会话自动切人工模式；随时熔断暂停 |
+
+**闲鱼实测 DOM（2025-11，版本变更会失效，表现为退出码 5 的 STRUCTURE）：**
+
+| 元素 | 选择器 |
+|---|---|
+| IM 页 | `https://www.goofish.com/im` |
+| 会话列表项 | `[class*="conversation-item"]`（排除 `skeleton`），未读 `.ant-badge-count`，激活 `-active-` |
+| 消息气泡 | `[class*="scroll-container"]` 内 `[class*="message-text"]`，自己的带 `-right-` 类 |
+| 输入框 | `textarea.ant-input` |
+| 发送按钮 | `[class*="sendbox-bottom"]` 内文本「发 送」 |
+| 在售商品 | `goofish.com/personal`（我发布的）→ 点「在售」→ `a[href*="item?id="]` + `[class*="price-wrap"]` |
+
+已知限制：
+- 会话标识用买家昵称（IM 页 DOM 无会话 id）；同名买家会串，需人工注意
+- 商品添加有两种：UI 里「从我的发布获取」读 `goofish.com/personal` 的在售列表勾选（实测 43 件），或手动填 item_id
+- 卖家订单页入口未打通（`/bought` 只有买家视角），发货触发目前依赖 LLM 的 payment 意图 + 会话幂等；卡密池为空时自动转人工
+- 「转人工」的判定靠内容闸门，不承诺万无一失；高危纠纷请人工接管
+
 ## 加站点
 
 仿 `sites/xy/`（借站点 SDK）或 `sites/red/`（点页面 + DOM）新建目录，在 `cli.py` 的 `DOMAINS` 里登记域名即可。

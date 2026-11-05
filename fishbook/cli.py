@@ -339,6 +339,29 @@ def cmd_red_check(args) -> int:
 # ---------- 入口 ----------
 
 
+def cmd_serve(args) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        log("缺少依赖：请先 uv sync（fastapi/uvicorn/openai）")
+        return EXIT_ENDPOINT
+
+    from pathlib import Path
+
+    from .serve.app import create_app
+    from .serve.service import Service
+
+    cdp_raw = args.cdp or os.environ.get("FISHBOOK_CDP") or None
+    base, _ = cdp.normalize_endpoint(cdp_raw)
+    service = Service(
+        cdp_raw or base, Path(args.state), poll_interval=(args.poll_min, args.poll_max)
+    )
+    service.start()
+
+    uvicorn.run(create_app(service), host=args.host, port=args.port, log_level="warning")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fishbook",
@@ -390,6 +413,13 @@ def build_parser() -> argparse.ArgumentParser:
     red_note_parser.add_argument(
         "target", help="完整 note URL（推荐，带 xsec_token）或 24 位 note_id"
     )
+
+    serve = sub.add_parser("serve", help="托管服务：Web UI + 客服 agent + 自动发货（虚拟）")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8756)
+    serve.add_argument("--poll-min", type=float, default=25.0, help="IM 轮询最小间隔秒")
+    serve.add_argument("--poll-max", type=float, default=45.0, help="IM 轮询最大间隔秒")
+    serve.add_argument("--state", default=".fishbook/state.db", help="SQLite 路径")
     return parser
 
 
@@ -406,6 +436,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_red_search(args)
         if getattr(args, "red_command", None) == "note":
             return cmd_red_note(args)
+        if args.command == "serve":
+            return cmd_serve(args)
+        if args.command == "serve":
+            return cmd_serve(args)
         raise UsageError("未知子命令")
     except FishbookError as exc:
         emit_error(exc)

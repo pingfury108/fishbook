@@ -74,6 +74,27 @@ def page_targets(base: str) -> list[dict]:
     return [t for t in list_targets(base) if t.get("type") == "page"]
 
 
+def find_target_url(base: str, domain: str) -> str | None:
+    """返回命中 domain 的 page target ws 地址，没有则 None（不回退不报错）。"""
+    for target in page_targets(base):
+        if domain in (target.get("url") or "") and target.get("webSocketDebuggerUrl"):
+            return target["webSocketDebuggerUrl"]
+    return None
+
+
+def open_tab(base: str, url: str) -> str:
+    """新开一个标签页并返回其 ws 地址（Chrome 128+ 要求 PUT）。"""
+    from urllib.parse import quote
+
+    req = urllib.request.Request(f"{base}/json/new?url={quote(url, safe='')}", method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
+            info = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise EndpointError(f"新开标签页失败 {url}: {exc}") from exc
+    return info["webSocketDebuggerUrl"]
+
+
 def resolve_target(base: str, domain: str) -> tuple[str, str]:
     """挑一个可用的 page target，返回 (ws 地址, 说明)。
 
