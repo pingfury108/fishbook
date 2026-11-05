@@ -17,11 +17,8 @@ CREATE TABLE IF NOT EXISTS managed_items (
   auto_reply INTEGER DEFAULT 1,
   auto_ship INTEGER DEFAULT 0,        -- 自动发货（虚拟）
   dry_run INTEGER DEFAULT 1,          -- 默认演练：只记录不发送
-  prompt TEXT DEFAULT '',             -- 商品话术/人设
-  faq TEXT DEFAULT '[]',              -- [{"k": 关键词, "a": 话术}]
-  price_floor TEXT DEFAULT '',        -- 价格底线
-  floor_reply TEXT DEFAULT '',        -- 低于底线的回复
-  ship_note TEXT DEFAULT '',          -- 发货文案模板（{secret} 为卡密占位）
+  guide TEXT DEFAULT '',              -- 商品说明书：自然语言写清怎么答、什么不能承诺
+  ship_note TEXT DEFAULT '',          -- 发货时发的那句话（{secret} 为卡密占位）
   created_at REAL
 );
 
@@ -75,6 +72,30 @@ class Store:
         self._lock = threading.Lock()
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(managed_items)")}
+        if "guide" not in cols:
+            self._conn.execute("ALTER TABLE managed_items ADD COLUMN guide TEXT DEFAULT ''")
+        # 旧字段合进 guide：prompt + FAQ 文本化
+        if "prompt" in cols:
+            rows = self._conn.execute("SELECT item_id, prompt, faq FROM managed_items").fetchall()
+            for row in rows:
+                parts = [row["prompt"] or ""]
+                raw_faq = row["faq"] or "[]"
+                if raw_faq and raw_faq != "[]":
+                    try:
+                        for entry in json.loads(raw_faq):
+                            if isinstance(entry, dict) and entry.get("k"):
+                                parts.append(f"买家问「{entry['k']}」时回：{entry.get('a', '')}")
+                    except ValueError:
+                        parts.append(raw_faq)
+                merged = "\n".join(p for p in parts if p).strip()
+                if merged:
+                    self._conn.execute(
+                        "UPDATE managed_items SET guide=? WHERE item_id=?", (merged, row["item_id"])
+                    )
 
     # ---- settings ----
 

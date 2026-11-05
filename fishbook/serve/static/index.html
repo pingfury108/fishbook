@@ -206,6 +206,8 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 let VIEW = "items";
 let toastTimer = null;
 
+function closeDlg() { $('#dlg').close(); }
+
 function toast(text) {
   const el = $("#toast");
   el.textContent = text;
@@ -351,23 +353,25 @@ async function editItem(id) {
   const it = st.items.find((x) => x.item_id === id) || {};
   const pool = await api("/api/items/" + id + "/pool");
   $("#dlgBody").innerHTML = `
-    <div class="dlg-head"><b>配置 ${esc(id)}</b><button class="btn sm" onclick="$('#dlg').close()">✕</button></div>
+    <div class="dlg-head">
+      <div><b>${esc(it.title || id)}</b>
+        <div class="muted" style="margin-top:2px">${esc(id)}${it.price ? " · ¥" + esc(it.price) : ""}</div></div>
+      <button class="btn sm" onclick="$('#dlg').close()">✕</button>
+    </div>
     <div class="dlg-body">
-      <label>话术 / 人设（客服 agent 的商品说明与语气）</label>
-      <textarea id="f_prompt">${esc(it.prompt)}</textarea>
-      <label>FAQ（JSON 数组：[{"k":"关键词|关键词","a":"回复话术"}]）</label>
-      <textarea id="f_faq">${esc(it.faq || "[]")}</textarea>
-      <div class="form-row">
-        <div><label>议价底线（元，低于不卖）</label><input id="f_floor" value="${esc(it.price_floor)}"></div>
-        <div><label>低于底线的话术</label><input id="f_floor_reply" value="${esc(it.floor_reply)}"></div>
-      </div>
-      <label>发货文案模板（{secret} 为卡密占位，仅自动发货时使用）</label>
-      <textarea id="f_ship">${esc(it.ship_note)}</textarea>
-      <label>卡密池（每行一条，追加导入）· 未用 ${pool.unused} / 共 ${pool.total}</label>
-      <textarea id="f_secrets" placeholder="ABC-123&#10;DEF-456"></textarea>
+      <label>客服说明书 —— 用大白话写这个商品怎么答就行，不用管格式</label>
+      <textarea id="f_guide" style="min-height:220px"
+        placeholder="例：这个商品是 AI 解题助手，¥2 一个月，拍下后我把兑换码发你。&#10;常见问题：怎么用→下载 App 输入兑换码；能退款吗→虚拟商品不支持。&#10;不要承诺永久有效，不要说能替代老师。">${esc(it.guide)}</textarea>
+      <p class="muted" style="margin:6px 0 0">可以写：卖什么、怎么答常见问题、什么不能承诺、议价口径。agent 会照这份说明回买家，没写到的不确定就转人工。</p>
+
+      <label>发货时发的那句话（{secret} 会替换成卡密）</label>
+      <input id="f_ship" value="${esc(it.ship_note)}" placeholder="已付款成功，兑换码：{secret}  10 分钟内有效">
+
+      <label>卡密池 · 未用 ${pool.unused} / 共 ${pool.total}（每行一条，追加导入）</label>
+      <textarea id="f_secrets" style="min-height:88px" placeholder="ABC-123&#10;DEF-456"></textarea>
     </div>
     <div class="dlg-foot">
-      <button class="btn" onclick="$('#dlg').close()">取消</button>
+      <button class="btn" onclick="closeDlg()">取消</button>
       <button class="btn primary" onclick="saveItem('${id}')">保存</button>
     </div>`;
   $("#dlg").showModal();
@@ -375,9 +379,7 @@ async function editItem(id) {
 
 async function saveItem(id) {
   await api("/api/items/" + id, { method: "POST", body: JSON.stringify({
-    prompt: $("#f_prompt").value, faq: $("#f_faq").value,
-    price_floor: $("#f_floor").value, floor_reply: $("#f_floor_reply").value,
-    ship_note: $("#f_ship").value }) });
+    guide: $("#f_guide").value, ship_note: $("#f_ship").value }) });
   const secrets = $("#f_secrets").value.trim();
   if (secrets) {
     const r = await api("/api/items/" + id + "/secrets", { method: "POST", body: JSON.stringify({ contents: secrets }) });
@@ -501,8 +503,9 @@ function renderSettings(st) {
         <label>API Key ${st.api_key_set ? "（留空保持不变）" : ""}</label>
         <input id="s_key" type="password" placeholder="sk-...">
         <div class="form-row">
-          <div><label>模型</label><input id="s_model" value="${esc(st.settings.model || "deepseek-chat")}"></div>
-          <div><label>店铺名（写进 prompt）</label><input id="s_shop" value="${esc(st.settings.shop || "")}"></div>
+          <div><label>模型</label><input id="s_model" value="${esc(st.settings.model || "deepseek-v4-flash")}"></div>
+          <div><label>店铺名（自动读取闲鱼主页昵称）</label>
+            <input id="s_shop" value="${esc(st.settings.shop || "读取中…")}" readonly></div>
         </div>
         <div style="margin-top:16px"><button class="btn primary" onclick="saveSettings()">保存设置</button></div>
       </div>
@@ -526,16 +529,25 @@ function renderSettings(st) {
         <span class="muted" style="margin-left:10px">扫描读取 IM 会话列表并处理新消息（演练模式下不发送）。</span>
       </div>
     </div>`;
+  loadShopName();
 }
 
 async function saveSettings() {
   const body = {};
   if ($("#s_key").value) body.api_key = $("#s_key").value;
   body.model = $("#s_model").value;
-  body.shop = $("#s_shop").value;
   await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
   toast("已保存");
   refresh();
+}
+
+async function loadShopName() {
+  const input = $("#s_shop");
+  if (!input || input.value !== "读取中…") return;
+  try {
+    const r = await api("/api/shop");
+    input.value = r.shop || "（未读到）";
+  } catch (e) { input.value = "（读取失败）"; }
 }
 
 async function guard(paused) {

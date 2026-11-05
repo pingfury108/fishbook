@@ -15,6 +15,13 @@ DOMAIN = "goofish.com/personal"
 READY_JS = "document.readyState === 'complete' && /宝贝|个人经营/.test(document.body ? document.body.innerText : '')"
 
 DISCOVER_JS = (Path(__file__).resolve().parent / "personal_discover.js").read_text(encoding="utf-8")
+SHOP_NAME_JS = """(() => {
+  const h1 = document.querySelector('h1, [class*="nickname"], [class*="user-name"], [class*="userName"]');
+  const text = h1 ? (h1.textContent || "").trim() : "";
+  if (text) return text.split("\\n")[0].slice(0, 30);
+  const title = document.title || "";
+  return title.replace(/_闲鱼$/, "").trim().slice(0, 30);
+})()"""
 
 
 def ensure_page(cdp_endpoint: str, page: CDP | None) -> CDP:
@@ -90,3 +97,9 @@ def discover(page: CDP, scrolls: int = 3) -> list[dict]:
     items = result.get("items") or []
     log(f"[personal] 在售商品 {len(items)} 个")
     return items
+
+
+def shop_name(page: CDP) -> str:
+    """读当前登录账号在个人主页显示的名字。"""
+    result = page.evaluate(SHOP_NAME_JS, retries=2)
+    return result.strip() if isinstance(result, str) else ""

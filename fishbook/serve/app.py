@@ -19,6 +19,20 @@ def create_app(service: Service) -> FastAPI:
     def index():
         return FileResponse(STATIC / "index.html")
 
+    @app.get("/api/shop")
+    async def shop_name():
+        """从闲鱼个人主页读取当前账号昵称，作为 prompt 里的店铺名。"""
+        cached = store.get_setting("shop")
+        if cached:
+            return {"ok": True, "shop": cached, "cached": True}
+        try:
+            name = service.worker.submit(lambda ctx: personal.shop_name(ctx.personal_page))
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=502)
+        if name:
+            store.set_setting("shop", name)
+        return {"ok": True, "shop": name or "", "cached": False}
+
     @app.get("/api/status")
     def status():
         return {

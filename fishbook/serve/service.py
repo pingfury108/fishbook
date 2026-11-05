@@ -41,7 +41,7 @@ class Service:
     def settings(self) -> dict:
         return {
             "api_key": self.store.get_setting("api_key"),
-            "model": self.store.get_setting("model", "deepseek-chat"),
+            "model": self.store.get_setting("model", "deepseek-v4-flash"),
             "shop": self.store.get_setting("shop", ""),
         }
 
@@ -175,7 +175,7 @@ class Service:
             log(f"[ship] {name} 卡密池为空")
             return
 
-        note = item.get("ship_note") or "您的兑换码：{secret}"
+        note = item.get("ship_note") or "已付款成功，这是你的兑换码：{secret}"
         text = note.replace("{secret}", secret)
 
         if item.get("dry_run"):
