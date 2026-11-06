@@ -448,14 +448,19 @@ async function renderConvs(st) {
         <div class="conv-name">${esc(c.name)} ${modeBadge} ${unreadBadge}</div>
         <div class="conv-preview">${esc(c.last_msg || "（暂无消息）")}</div>
       </div>
-      <div>${item ? `<span class="badge">${esc((item.title || item.item_id).slice(0, 14))}</span>` : '<span class="badge gray">未关联</span>'}</div>
+      <div>${item
+        ? `<span class="badge">${esc((item.title || item.item_id).slice(0, 14))}</span>`
+        : '<span class="badge red">未关联 · agent 不会接管</span>'}</div>
     </div>`;
   }).join("");
 
   const itemOpts = items.map((i) => `<option value="${esc(i.item_id)}">${esc((i.title || i.item_id).slice(0, 24))}</option>`).join("");
   $("#main").innerHTML = `
     <div class="page-head">
-      <div><h2>会话</h2><p>轮询间隔 25~45 秒；会话需关联到「接管中」的商品才会被 agent 接管。</p></div>
+      <div><h2>会话</h2>
+        <p>轮询间隔 25~45 秒。会话需关联到「接管中」的商品才会被 agent 接管；
+           只有一个托管商品时会自动关联，多个商品需手动关联。
+           显示「人工」的会话 agent 不再介入（手动发过消息就会切成人工）。</p></div>
     </div>
     <div class="panel">${rows || '<div class="empty">暂无会话<br><span class="muted">买家来信后会出现在这里</span></div>'}</div>
     <div class="panel">

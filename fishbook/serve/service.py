@@ -115,16 +115,27 @@ class Service:
 
         # 有未读且接管中的会话才进一步处理
         targets = []
+        managed = self.store.managed_items()
         for conv in conversations:
             if not conv.get("unread"):
                 continue
-            record = self.store.get_conversation(conv["name"]) or {}
+            name = conv["name"]
+            record = self.store.get_conversation(name) or {}
             item_id = record.get("item_id") or ""
+
+            # 未关联商品：只有一个托管商品时自动关联（多数卖家就是单品）
+            if not item_id and len(managed) == 1:
+                item_id = managed[0]["item_id"]
+                self.store.set_conversation(name, item_id=item_id)
+                log(f"[watcher] {name} 自动关联到唯一托管商品 {item_id}")
+
             item = self.store.get_item(item_id) if item_id else None
             if not item or not item.get("managed"):
-                self.store.upsert_conversation(conv["name"], conv["unread"], conv["preview"])
+                log(f"[watcher] 跳过 {name}: 未关联到已接管商品")
+                self.store.upsert_conversation(name, conv["unread"], conv["preview"])
                 continue
             if record.get("mode") == "manual":
+                log(f"[watcher] 跳过 {name}: 人工模式（UI 里可切回自动）")
                 continue
             targets.append((conv, item))
 
