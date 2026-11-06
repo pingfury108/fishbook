@@ -161,6 +161,10 @@
   .banner { display: none; background: var(--danger-weak); color: var(--danger); border-bottom: 1px solid oklch(0.9 0.04 27);
             padding: 9px 32px; font-size: 13px; }
   .banner button { margin-left: 10px; }
+  .infobox { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-s);
+             padding: 12px 14px; font-size: 12.5px; line-height: 1.65; color: var(--text-2);
+             max-height: 150px; overflow: auto; white-space: pre-wrap; }
+  .infobox b { color: var(--text); }
   .keycard { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--radius-s);
              background: var(--bg); border: 1px solid var(--line); margin-top: 6px; }
   .keycard b { font-family: var(--mono); font-size: 13px; letter-spacing: 0.3px; }
@@ -270,6 +274,7 @@ function renderItems(st) {
         ${itemToggles(it)}
         <div class="sep"></div>
         <button class="btn sm" onclick="editItem('${it.item_id}')">配置</button>
+        <button class="btn sm danger" onclick="removeItem('${it.item_id}')">删除</button>
       </div>
     </div>`).join("");
 
@@ -359,29 +364,61 @@ async function editItem(id) {
   const st = await api("/api/status");
   const it = st.items.find((x) => x.item_id === id) || {};
   const pool = await api("/api/items/" + id + "/pool");
+  const info = it.item_desc
+    ? `<b>${esc(it.title || "")}</b>\n价格 ¥${esc(it.price || "-")} · ${esc(it.item_status || "")}\n\n${esc(it.item_desc)}`
+    : '<span class="muted">还没有商品信息，点「重新获取」从闲鱼详情页拉取</span>';
   $("#dlgBody").innerHTML = `
     <div class="dlg-head">
       <div><b>${esc(it.title || id)}</b>
         <div class="muted" style="margin-top:2px">${esc(id)}${it.price ? " · ¥" + esc(it.price) : ""}</div></div>
-      <button class="btn sm" onclick="$('#dlg').close()">✕</button>
+      <button class="btn sm" onclick="closeDlg()">✕</button>
     </div>
     <div class="dlg-body">
-      <label>客服说明书 —— 用大白话写这个商品怎么答就行，不用管格式</label>
-      <textarea id="f_guide" style="min-height:220px"
-        placeholder="例：这个商品是 AI 解题助手，¥2 一个月，拍下后我把兑换码发你。&#10;常见问题：怎么用→下载 App 输入兑换码；能退款吗→虚拟商品不支持。&#10;不要承诺永久有效，不要说能替代老师。">${esc(it.guide)}</textarea>
-      <p class="muted" style="margin:6px 0 0">可以写：卖什么、怎么答常见问题、什么不能承诺、议价口径。agent 会照这份说明回买家，没写到的不确定就转人工。</p>
+      <label style="display:flex; justify-content:space-between; align-items:center">
+        <span>商品信息（自动获取，不用填）</span>
+        <button class="btn sm" onclick="refetchDetail('${id}')">重新获取</button>
+      </label>
+      <div class="infobox" id="infoBox">${info}</div>
+
+      <label>补充说明 —— 只写商品信息里没有的部分，可留空</label>
+      <textarea id="f_guide" style="min-height:140px"
+        placeholder="例：买家问「怎么用」回：下载 App 输入兑换码；虚拟商品不支持退款；不要承诺永久有效；议价一律不降。">${esc(it.guide)}</textarea>
+      <p class="muted" style="margin:6px 0 0">agent 会把「商品信息」和这里的补充一起交给模型，商品信息冲突时以补充说明为准。</p>
 
       <label>发货时发的那句话（{secret} 会替换成卡密）</label>
-      <input id="f_ship" value="${esc(it.ship_note)}" placeholder="已付款成功，兑换码：{secret}  10 分钟内有效">
+      <input id="f_ship" value="${esc(it.ship_note)}" placeholder="已付款成功，兑换码：{secret}">
 
       <label>卡密池 · 未用 ${pool.unused} / 共 ${pool.total}（每行一条，追加导入）</label>
-      <textarea id="f_secrets" style="min-height:88px" placeholder="ABC-123&#10;DEF-456"></textarea>
+      <textarea id="f_secrets" style="min-height:80px" placeholder="ABC-123&#10;DEF-456"></textarea>
     </div>
     <div class="dlg-foot">
       <button class="btn" onclick="closeDlg()">取消</button>
       <button class="btn primary" onclick="saveItem('${id}')">保存</button>
     </div>`;
   $("#dlg").showModal();
+}
+
+async function refetchDetail(id) {
+  const box = $("#infoBox");
+  box.innerHTML = '<span class="spin"></span> 正在从闲鱼详情页获取…';
+  try {
+    const r = await api("/api/items/" + id + "/fetch", { method: "POST" });
+    const it = r.item || {};
+    box.innerHTML = `<b>${esc(it.title || "")}</b>\n价格 ¥${esc(it.price || "-")} · ${esc(it.item_status || "")}\n\n${esc(it.item_desc || "（该商品没有描述）")}`;
+    toast("商品信息已更新");
+    refresh();
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--danger)">获取失败：${esc(e.message)}</span>`;
+  }
+}
+
+async function removeItem(id) {
+  if (!confirm("确定删除托管商品 " + id + " ？\n\n卡密池会一起清空，关联会话会解除关联。")) return;
+  try {
+    await api("/api/items/" + id, { method: "DELETE" });
+    toast("已删除");
+    refresh();
+  } catch (e) { toast("删除失败: " + e.message); }
 }
 
 async function saveItem(id) {

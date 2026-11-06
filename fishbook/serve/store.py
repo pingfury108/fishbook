@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS managed_items (
   auto_reply INTEGER DEFAULT 1,
   auto_ship INTEGER DEFAULT 0,        -- 自动发货（虚拟）
   dry_run INTEGER DEFAULT 1,          -- 默认演练：只记录不发送
-  guide TEXT DEFAULT '',              -- 商品说明书：自然语言写清怎么答、什么不能承诺
+  item_desc TEXT DEFAULT '',          -- 商品描述（自动从详情接口取，用户不用填）
+  item_status TEXT DEFAULT '',        -- 在售/已下架等
+  fetched_at REAL DEFAULT 0,          -- 详情最近一次拉取时间
+  guide TEXT DEFAULT '',              -- 补充说明：商品信息里没有的部分
   ship_note TEXT DEFAULT '',          -- 发货时发的那句话（{secret} 为卡密占位）
   created_at REAL
 );
@@ -76,6 +79,11 @@ class Store:
 
     def _migrate(self) -> None:
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(managed_items)")}
+        for col in ("item_desc", "item_status"):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE managed_items ADD COLUMN {col} TEXT DEFAULT ''")
+        if "fetched_at" not in cols:
+            self._conn.execute("ALTER TABLE managed_items ADD COLUMN fetched_at REAL DEFAULT 0")
         if "guide" not in cols:
             self._conn.execute("ALTER TABLE managed_items ADD COLUMN guide TEXT DEFAULT ''")
         # 旧字段合进 guide：prompt + FAQ 文本化
@@ -129,10 +137,10 @@ class Store:
             "auto_reply",
             "auto_ship",
             "dry_run",
-            "prompt",
-            "faq",
-            "price_floor",
-            "floor_reply",
+            "item_desc",
+            "item_status",
+            "fetched_at",
+            "guide",
             "ship_note",
         }
         keys = [k for k in fields if k in allowed]
@@ -158,6 +166,13 @@ class Store:
     def managed_items(self) -> list[dict]:
         rows = self._conn.execute("SELECT * FROM managed_items WHERE managed=1").fetchall()
         return [dict(r) for r in rows]
+
+    def delete_item(self, item_id: str) -> None:
+        """删商品：连带清掉它的卡密池，并把关联会话置空（会话本身保留）。"""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM managed_items WHERE item_id=?", (item_id,))
+            self._conn.execute("DELETE FROM ship_pool WHERE item_id=?", (item_id,))
+            self._conn.execute("UPDATE conversations SET item_id='' WHERE item_id=?", (item_id,))
 
     # ---- conversations ----
 

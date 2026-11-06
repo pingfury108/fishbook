@@ -58,10 +58,34 @@ def ensure_page(cdp_endpoint: str, page: CDP | None) -> CDP:
     base, _ = cdp_mod.normalize_endpoint(cdp_endpoint)
     ws_url = find_target_url(base, DOMAIN)
     if not ws_url:
-        ws_url = open_tab(base, PERSONAL_URL)
+        ws_url = open_tab(base, PERSONAL_URL)["ws_url"]
     page = cdp_mod.CDP(ws_url).connect()
     goto_personal(page)
     return page
+
+
+def discover_once(cdp_endpoint: str) -> list[dict]:
+    """一次性读取在售商品：需要新标签就新开，读完立刻关掉，不留残留标签。"""
+    from ... import cdp as cdp_mod
+
+    base, _ = cdp_mod.normalize_endpoint(cdp_endpoint)
+    existing = find_target_url(base, DOMAIN)
+    page = None
+    opened_id = ""
+    try:
+        if existing:
+            page = cdp_mod.CDP(existing).connect()
+        else:
+            tab = open_tab(base, PERSONAL_URL)
+            page = cdp_mod.CDP(tab["ws_url"]).connect()
+            opened_id = tab["target_id"]
+        return discover(page)
+    finally:
+        if page is not None:
+            with contextlib.suppress(Exception):
+                page.close()
+        if opened_id:
+            cdp_mod.close_tab(base, opened_id)
 
 
 def goto_personal(page: CDP, timeout: float = 20.0) -> None:

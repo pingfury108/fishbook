@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ...cdp import CDP
-from ...util import number, render
+from ...cdp import CDP, MTOP_READY_JS
+from ...util import log, number, render
 from .mtop import JS_DIR, call, ensure_ready
 
 ITEM_URL = "https://www.goofish.com/item?id={item_id}"
@@ -63,6 +63,19 @@ def map_detail(data: dict) -> dict:
             "reply_interval": seller.get("replyInterval"),
         },
     }
+
+
+def fetch_light(page: CDP, item_id: str) -> dict | None:
+    """在任意已就绪的 goofish 页面直接调详情接口，不导航（批量取详情用这个）。
+
+    mtop 的签名/token 由页面 SDK 负责，和当前停留在哪个 goofish 页面无关。
+    """
+    if not page.evaluate(MTOP_READY_JS, retries=2):
+        log("[item] 当前页面没有 mtop SDK，跳过详情获取")
+        return None
+    js = render(_TEMPLATE, ITEM_ID=str(item_id))
+    data = call(page, js, ITEM_URL.format(item_id=item_id))
+    return map_detail(data)
 
 
 def run(page: CDP, item_id: str) -> dict:

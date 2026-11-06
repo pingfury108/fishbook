@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from ..sites.xy import im, personal
+from ..sites.xy import item as xy_item
 from .service import STATIC, Service
 
 
@@ -49,7 +51,7 @@ def create_app(service: Service) -> FastAPI:
     async def discover_items():
         """从闲鱼「我发布的」读取在售商品列表（供 UI 勾选添加）。"""
         try:
-            items = service.worker.submit(lambda ctx: personal.discover(ctx.personal_page))
+            items = personal.discover_once(service.cdp_endpoint)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=502)
         known = {i["item_id"] for i in store.list_items()}
@@ -64,6 +66,28 @@ def create_app(service: Service) -> FastAPI:
         if not item_id:
             return JSONResponse({"ok": False, "error": "item_id 必填"}, status_code=400)
         store.upsert_item(item_id, str(body.get("title") or ""), str(body.get("price") or ""))
+        # 顺手用详情接口补齐描述，失败了也不影响添加
+        warning = ""
+        try:
+            detail = service.worker.submit(lambda ctx: xy_item.fetch_light(ctx.page, item_id))
+            if detail:
+                store.update_item(
+                    item_id,
+                    {
+                        "title": detail.get("title") or str(body.get("title") or ""),
+                        "price": str(detail.get("price") or body.get("price") or ""),
+                        "item_desc": (detail.get("desc") or "").strip()[:2000],
+                        "item_status": detail.get("status") or "",
+                        "fetched_at": time.time(),
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            warning = f"商品信息未取到: {str(exc)[:100]}"
+        return {"ok": True, "warning": warning}
+
+    @app.delete("/api/items/{item_id}")
+    def delete_item(item_id: str):
+        store.delete_item(item_id)
         return {"ok": True}
 
     @app.post("/api/items/{item_id}")
@@ -74,6 +98,29 @@ def create_app(service: Service) -> FastAPI:
         if not store.get_item(item_id):
             store.upsert_item(item_id)
         store.update_item(item_id, body)
+        return {"ok": True, "item": store.get_item(item_id)}
+
+    @app.post("/api/items/{item_id}/fetch")
+    def fetch_item_detail(item_id: str):
+        """从闲鱼详情接口拉商品信息（标题/价格/描述/状态），用户不用手填。"""
+        item = store.get_item(item_id) or {}
+        try:
+            detail = service.worker.submit(lambda ctx: xy_item.fetch_light(ctx.page, item_id))
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=502)
+        if not detail:
+            return JSONResponse({"ok": False, "error": "详情接口没返回内容"}, status_code=502)
+
+        store.update_item(
+            item_id,
+            {
+                "title": detail.get("title") or item.get("title") or "",
+                "price": str(detail.get("price") or item.get("price") or ""),
+                "item_desc": (detail.get("desc") or "").strip()[:2000],
+                "item_status": detail.get("status") or "",
+                "fetched_at": time.time(),
+            },
+        )
         return {"ok": True, "item": store.get_item(item_id)}
 
     @app.post("/api/items/{item_id}/secrets")

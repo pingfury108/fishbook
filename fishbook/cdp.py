@@ -82,8 +82,8 @@ def find_target_url(base: str, domain: str) -> str | None:
     return None
 
 
-def open_tab(base: str, url: str) -> str:
-    """新开一个标签页并返回其 ws 地址（Chrome 128+ 要求 PUT）。"""
+def open_tab(base: str, url: str) -> dict:
+    """新开一个标签页，返回 {ws_url, target_id}（Chrome 128+ 要求 PUT）。"""
     from urllib.parse import quote
 
     req = urllib.request.Request(f"{base}/json/new?url={quote(url, safe='')}", method="PUT")
@@ -92,7 +92,17 @@ def open_tab(base: str, url: str) -> str:
             info = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise EndpointError(f"新开标签页失败 {url}: {exc}") from exc
-    return info["webSocketDebuggerUrl"]
+    return {"ws_url": info["webSocketDebuggerUrl"], "target_id": info.get("id", "")}
+
+
+def close_tab(base: str, target_id: str) -> None:
+    """关掉自己开出来的标签页；关不掉就当无事发生。"""
+    if not target_id:
+        return
+    try:
+        urllib.request.urlopen(f"{base}/json/close/{target_id}", timeout=CONNECT_TIMEOUT)
+    except (urllib.error.URLError, OSError):
+        pass
 
 
 def resolve_target(base: str, domain: str) -> tuple[str, str]:
