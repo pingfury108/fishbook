@@ -647,7 +647,7 @@ function setKeyStatus(cls, text) {
 async function testKey() {
   setKeyStatus("busy", '<span class="spin"></span> 正在测试模型连接…');
   try {
-    const r = await api("/api/llm/test");
+    const r = await api("/api/llm/test", { method: "POST" });
     setKeyStatus("ok", `✓ 连接正常 · 模型 ${esc(r.model)} · ${r.latency_ms}ms`);
     toast("模型可用");
   } catch (e) {

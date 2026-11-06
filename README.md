@@ -287,6 +287,15 @@ fishbook --cdp ... serve --poll-min 30 --poll-max 60 --state .fishbook/state.db
 - 卖家订单页入口未打通（`/bought` 只有买家视角），发货触发目前依赖 LLM 的 payment 意图 + 会话幂等；卡密池为空时自动转人工
 - 「转人工」的判定靠内容闸门，不承诺万无一失；高危纠纷请人工接管
 
+## 自检脚本
+
+```bash
+uv run python scripts/check_ui_api.py
+```
+
+静态比对「前端 `api()` 调用的 method/路径」与 FastAPI 路由，防止出现
+「前端 GET、后端只有 POST → 405 Method Not Allowed」这类低级错误。
+
 ## 加站点
 
 仿 `sites/xy/`（借站点 SDK）或 `sites/red/`（点页面 + DOM）新建目录，在 `cli.py` 的 `DOMAINS` 里登记域名即可。
