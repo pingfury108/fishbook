@@ -348,19 +348,35 @@ def cmd_serve(args) -> int:
 
     from pathlib import Path
 
-    from .serve.app import create_app
-    from .serve.service import Service
-
     os.environ.setdefault("FISHBOOK_LOG", ".fishbook/serve.log")
 
     cdp_raw = args.cdp or os.environ.get("FISHBOOK_CDP") or None
     base, _ = cdp.normalize_endpoint(cdp_raw)
-    service = Service(
-        cdp_raw or base, Path(args.state), poll_interval=(args.poll_min, args.poll_max)
-    )
-    service.start()
+    # 服务实例由 factory 在 worker 进程里创建（--reload 时能干净重建）
+    os.environ["FISHBOOK_CDP_ADDR"] = cdp_raw or base
+    os.environ["FISHBOOK_STATE"] = args.state
+    os.environ["FISHBOOK_POLL_MIN"] = str(args.poll_min)
+    os.environ["FISHBOOK_POLL_MAX"] = str(args.poll_max)
 
-    uvicorn.run(create_app(service), host=args.host, port=args.port, log_level="warning")
+    if args.reload:
+        package_dir = Path(__file__).resolve().parent
+        log(f"开发模式：监听 {package_dir} 与 static/ 的变化（改代码自动重启）")
+        uvicorn.run(
+            "fishbook.serve.factory:app_factory",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            reload=True,
+            reload_dirs=[str(package_dir)],
+            reload_includes=["*.py", "*.js", "*.html"],
+            log_level="info",
+        )
+        return EXIT_OK
+
+    from .serve.app import create_app
+    from .serve.factory import build_service
+
+    uvicorn.run(create_app(build_service()), host=args.host, port=args.port, log_level="warning")
     return EXIT_OK
 
 
@@ -422,6 +438,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--poll-min", type=float, default=25.0, help="IM 轮询最小间隔秒")
     serve.add_argument("--poll-max", type=float, default=45.0, help="IM 轮询最大间隔秒")
     serve.add_argument("--state", default=".fishbook/state.db", help="SQLite 路径")
+    serve.add_argument(
+        "--reload", action="store_true", help="开发模式：改代码自动重启（uvicorn reload）"
+    )
     return parser
 
 

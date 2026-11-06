@@ -233,9 +233,20 @@ fishbook/
 ## 托管服务（serve）
 
 ```bash
-fishbook --cdp 127.0.0.1:9222 serve          # Web UI: http://127.0.0.1:8756
+# 常驻运行
+fishbook --cdp 127.0.0.1:9222 serve              # Web UI: http://127.0.0.1:8756
+
+# 开发：改 Python / JS / HTML 自动重启（uvicorn reload）
+fishbook --cdp 127.0.0.1:9222 serve --reload
+
+# 其它参数
 fishbook --cdp ... serve --poll-min 30 --poll-max 60 --state .fishbook/state.db
 ```
+
+- `--reload` 由 uvicorn 监听 `fishbook/` 目录；watcher 线程在 worker 进程里重建，不会留僵尸轮询
+- 静态页（`static/index.html`）改动**不需要** reload，刷新浏览器即可（已禁缓存）
+- 日志：stderr + `.fishbook/serve.log`（取证用）
+- 停止：`Ctrl+C`；或 `pkill -f "fishbook --cdp"`
 
 常驻进程：轮询闲鱼 IM 页 DOM（25~45s 随机）→ 新消息走客服 agent → 自动回复；买家付款意图 + 自动发货开关 → 从卡密池取一条发给买家。
 
