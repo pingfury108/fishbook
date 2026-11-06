@@ -235,6 +235,9 @@ async function api(path, opts = {}) {
 }
 
 async function refresh() {
+  // 弹窗打开时不动页面，避免把用户正在填的内容冲掉
+  const dlg = $("#dlg");
+  if (dlg && dlg.open) return;
   let st;
   try { st = await api("/api/status"); }
   catch { $("#svcDot").className = "dot bad"; $("#svcText").textContent = "服务离线"; return; }
@@ -244,7 +247,12 @@ async function refresh() {
   $("#svcMeta").textContent = `商品 ${st.items.length} · 会话 ${st.conversations.length}`;
   if (VIEW === "items") renderItems(st);
   else if (VIEW === "convs") renderConvs(st);
-  else renderSettings(st);
+  else {
+    // 设置页：用户正在输入/有未保存内容时不要重渲染，否则输入会被冲掉
+    const editing = document.activeElement && document.activeElement.closest("#main");
+    const dirty = $("#s_key") && $("#s_key").value.trim() !== "";
+    if (!editing && !dirty) renderSettings(st);
+  }
 }
 
 /* ============ 商品托管 ============ */
@@ -422,8 +430,19 @@ async function removeItem(id) {
 }
 
 async function saveItem(id) {
-  await api("/api/items/" + id, { method: "POST", body: JSON.stringify({
-    guide: $("#f_guide").value, ship_note: $("#f_ship").value }) });
+  const guideEl = $("#f_guide");
+  const shipEl = $("#f_ship");
+  if (!guideEl || !shipEl) {
+    toast("页面是旧版本，请刷新页面（Cmd+R）后重试");
+    return;
+  }
+  try {
+    await api("/api/items/" + id, { method: "POST", body: JSON.stringify({
+      guide: guideEl.value, ship_note: shipEl.value }) });
+  } catch (e) {
+    toast("保存失败: " + e.message);
+    return;  // 失败就留在弹窗里，不要静默关闭
+  }
   const secrets = $("#f_secrets").value.trim();
   if (secrets) {
     const r = await api("/api/items/" + id + "/secrets", { method: "POST", body: JSON.stringify({ contents: secrets }) });
@@ -610,8 +629,12 @@ function renderSettings(st) {
 
 function toggleKeyInput() {
   const wrap = $("#keyInputWrap");
+  if (!wrap) return;  // Key 未配置时没有包裹层，直接是输入框
   wrap.style.display = wrap.style.display === "none" ? "block" : "none";
-  if (wrap.style.display === "block") $("#s_key").focus();
+  if (wrap.style.display === "block") {
+    const input = $("#s_key");
+    if (input) input.focus();
+  }
 }
 
 function setKeyStatus(cls, text) {
@@ -651,6 +674,8 @@ async function saveSettings() {
     refresh();
     return;
   }
+  const typed = $("#s_key");
+  if (typed) typed.value = "";
   await testKey();
   refresh();
 }

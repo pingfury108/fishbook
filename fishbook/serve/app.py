@@ -19,7 +19,11 @@ def create_app(service: Service) -> FastAPI:
 
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html")
+        # 前端改动频繁，禁掉缓存，避免旧页面调旧接口静默失败
+        return FileResponse(
+            STATIC / "index.html",
+            headers={"Cache-Control": "no-store, must-revalidate"},
+        )
 
     @app.get("/api/shop")
     async def shop_name():
@@ -96,7 +100,10 @@ def create_app(service: Service) -> FastAPI:
         if body.get("faq") is not None and not isinstance(body["faq"], str):
             body["faq"] = json.dumps(body["faq"], ensure_ascii=False)
         if not store.get_item(item_id):
-            store.upsert_item(item_id)
+            return JSONResponse(
+                {"ok": False, "error": f"商品 {item_id} 不存在，可能已被删除，请刷新列表"},
+                status_code=404,
+            )
         store.update_item(item_id, body)
         return {"ok": True, "item": store.get_item(item_id)}
 
