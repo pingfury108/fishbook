@@ -18,7 +18,9 @@
         .filter((t) => t !== (badge ? badge.textContent : "") && !TIME_RE.test(t));
       return {
         name: parts[0] || "",
-        preview: (parts[1] || "").slice(0, 60),
+        // 有的会话行会在昵称和消息之间插入商品标题，全部保留给 Python 侧匹配
+        extras: parts.slice(1, 4).map((t) => t.slice(0, 60)),
+        preview: (parts[parts.length - 1] || "").slice(0, 60),
         unread: unread,
         active: el.className.includes("active"),
       };
