@@ -14,6 +14,7 @@ import json
 import re
 
 from ..util import log
+from . import guard
 
 # 硬性安全闸门：这类话题一律不自动回复（与商品配置无关）
 SENSITIVE = (
@@ -32,24 +33,6 @@ SENSITIVE = (
     "加qq",
     "转账",
 )
-PHONE_RE = re.compile(r"1[3-9]\d{9}")
-# 域名/链接：允许出现商品信息里本来就有的（虚拟商品常常就是卖某个站/App）
-LINK_RE = re.compile(
-    r"(?:https?://[^\s，。；]+|(?:[a-z0-9-]+\.)+(?:cn|com|net|org|io|cc|xyz|top|site)(?:/[^\s，。；]*)?)",
-    re.IGNORECASE,
-)
-
-
-def _foreign_link(reply: str, sources: str) -> str | None:
-    """回复里出现了商品信息之外的链接 → 认为在往站外引。"""
-    allowed = {link.lower().rstrip(".") for link in LINK_RE.findall(sources or "")}
-    for link in LINK_RE.findall(reply or ""):
-        target = link.lower().rstrip(".")
-        if not any(target in allowed_one or allowed_one in target for allowed_one in allowed):
-            return target
-    return None
-
-
 SYSTEM_TEMPLATE = """你在替闲鱼卖家「{shop}」回复买家。
 
 商品信息（闲鱼商品页原文）：
@@ -85,20 +68,29 @@ def _guide(item: dict) -> str:
     return str(item.get("guide") or "").strip() or DEFAULT_GUIDE
 
 
-def llm_reply(item: dict, history: list[dict], api_key: str, model: str, shop: str) -> dict:
+def llm_reply(
+    item: dict,
+    history: list[dict],
+    api_key: str,
+    model: str,
+    shop: str,
+    secrets: list[str] | None = None,
+) -> dict:
+    secrets = secrets or []
     """调 DeepSeek。失败/不确定都返回 need_human 形态，绝不瞎回。"""
     try:
         from openai import OpenAI
     except ImportError:
         return {"reply": "", "need_human": True, "error": "openai 未安装"}
 
+    # 卡密永远不进 prompt：即使卖家把它写进了描述/说明，也先抹掉
     system = SYSTEM_TEMPLATE.format(
         shop=shop or "我",
-        title=item.get("title") or "（见对话）",
+        title=guard.scrub(item.get("title") or "（见对话）", secrets),
         price=item.get("price") or "见商品页",
         status=item.get("item_status") or "在售",
-        desc=(item.get("item_desc") or "").strip()[:600] or "（无描述）",
-        guide=_guide(item) or "（无，按商品信息如实回答）",
+        desc=guard.scrub((item.get("item_desc") or "").strip()[:600], secrets) or "（无描述）",
+        guide=guard.scrub(_guide(item), secrets) or "（无，按商品信息如实回答）",
     )
     messages = [{"role": "system", "content": system}]
     for msg in history[-10:]:
@@ -140,18 +132,36 @@ def llm_reply(item: dict, history: list[dict], api_key: str, model: str, shop: s
             return {"reply": "", "need_human": True, "error": "模型返回空或非 JSON"}
 
     reply = str(data.get("reply") or "").strip()
-    sources = " ".join(
-        str(item.get(key) or "") for key in ("title", "item_desc", "guide", "ship_note")
-    )
-    # 输出兜底：手机号 / 站外链接 / 过长 一律拦下转人工
-    if reply and PHONE_RE.search(reply):
-        return {"reply": "", "need_human": True, "error": "回复含手机号"}
-    foreign = _foreign_link(reply, sources) if reply else None
-    if foreign:
-        return {"reply": "", "need_human": True, "error": f"回复含站外链接 {foreign}"}
-    if len(reply) > 300:
-        return {"reply": "", "need_human": True, "error": "回复过长"}
-    return {"reply": reply, "need_human": bool(data.get("need_human")) or not reply}
+
+    if not reply and not data.get("need_human"):
+        # 推理模型偶尔空回复：去掉 response_format 再要一次
+        reply = _retry_reply(client, model, messages)
+
+    if not reply:
+        return {"reply": "", "need_human": True, "error": "模型没有给出回复"}
+
+    # 输出兜底：卡密 / 手机号 / 站外链接 / 像卡密的串 / 过长 → 一律转人工
+    reason = guard.check_outgoing(reply, guard.item_sources(item), secrets)
+    if reason:
+        return {"reply": "", "need_human": True, "error": f"回复被拦截：{reason}"}
+    return {"reply": reply, "need_human": bool(data.get("need_human"))}
+
+
+def _retry_reply(client, model: str, messages: list[dict]) -> str:
+    """空回复兜底：直接要一句话，失败就返回空串（上层会转人工）。"""
+    try:
+        retry = client.chat.completions.create(
+            model=model or "deepseek-v4-flash",
+            messages=messages + [{"role": "user", "content": '只输出 JSON：{"reply": "..."}'}],
+            temperature=0.4,
+            timeout=45,
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"LLM 空回复重试失败: {exc}")
+        return ""
+    data = _parse_json(retry.choices[0].message.content or "")
+    return str((data or {}).get("reply") or "").strip()
 
 
 def _parse_json(content: str) -> dict | None:
@@ -174,7 +184,9 @@ def _parse_json(content: str) -> dict | None:
         return None
 
 
-def decide(item: dict, history: list[dict], settings: dict) -> dict:
+def decide(
+    item: dict, history: list[dict], settings: dict, secrets: list[str] | None = None
+) -> dict:
     """返回 {action: reply|human|ignore, text, decision, detail}。"""
     last = history[-1]["text"] if history else ""
     if not last or history[-1]["side"] == "me":
@@ -188,11 +200,26 @@ def decide(item: dict, history: list[dict], settings: dict) -> dict:
             "detail": f"命中敏感话题: {last[:40]}",
         }
 
+    # 防套话 / 防提示注入：命中就不交给模型，直接转人工
+    inbound_risk = guard.classify_inbound(last)
+    if inbound_risk:
+        return {
+            "action": "human",
+            "text": "",
+            "decision": "gate",
+            "detail": f"{inbound_risk}: {last[:40]}",
+        }
+
     if not settings.get("api_key"):
         return {"action": "human", "text": "", "decision": "gate", "detail": "未配置 LLM key"}
 
     result = llm_reply(
-        item, history, settings["api_key"], settings.get("model", ""), settings.get("shop", "")
+        item,
+        history,
+        settings["api_key"],
+        settings.get("model", ""),
+        settings.get("shop", ""),
+        secrets,
     )
     if result.get("need_human"):
         return {

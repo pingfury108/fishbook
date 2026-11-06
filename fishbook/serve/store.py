@@ -259,7 +259,22 @@ class Store:
             )
         return len([c for c in contents if c.strip()])
 
-    def take_secret(self, item_id: str) -> str | None:
+    def item_secrets(self, item_id: str) -> list[str]:
+        """全部卡密（含已用），用于外发内容防泄漏比对。"""
+        rows = self._conn.execute(
+            "SELECT content FROM ship_pool WHERE item_id=?", (item_id,)
+        ).fetchall()
+        return [row["content"] for row in rows if row["content"]]
+
+    def peek_secret(self, item_id: str) -> str | None:
+        """看一眼下一条可用卡密，但不消耗（dry-run 用）。"""
+        row = self._conn.execute(
+            "SELECT content FROM ship_pool WHERE item_id=? AND status='unused' ORDER BY id LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        return row["content"] if row else None
+
+    def take_secret(self, item_id: str, chat: str = "") -> str | None:
         with self._lock, self._conn:
             row = self._conn.execute(
                 "SELECT id, content FROM ship_pool WHERE item_id=? AND status='unused' ORDER BY id LIMIT 1",
@@ -268,7 +283,8 @@ class Store:
             if not row:
                 return None
             self._conn.execute(
-                "UPDATE ship_pool SET status='used', used_at=? WHERE id=?", (now(), row["id"])
+                "UPDATE ship_pool SET status='used', used_at=?, chat=? WHERE id=?",
+                (now(), chat, row["id"]),
             )
             return row["content"]
 

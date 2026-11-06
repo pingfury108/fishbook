@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..sites.xy import im
 from ..util import log, sleep_jitter
-from . import agent
+from . import agent, guard
 from .store import Store
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -152,7 +152,8 @@ class Service:
         self.store.add_message(name, "in", history[-1]["text"])
 
         settings = self.settings()
-        decision = agent.decide(item, history, settings)
+        secrets = self.store.item_secrets(item["item_id"])
+        decision = agent.decide(item, history, settings, secrets=secrets)
         self._apply_decision(name, item, decision)
 
         # 自动发货：LLM 判断买家已付款
@@ -183,6 +184,15 @@ class Service:
             self.store.add_message(name, "dry", text, decision["decision"], "触发每日上限，未发送")
             return
 
+        # 发送前最后一道：卡密 / 手机号 / 站外链接 / 疑似卡密串
+        secrets = self.store.item_secrets(item["item_id"])
+        reason = guard.check_outgoing(text, guard.item_sources(item), secrets)
+        if reason:
+            self.store.add_message(name, "dry", "", decision["decision"], f"发送前拦截：{reason}")
+            self.store.set_conversation(name, mode="manual")
+            log(f"[guard] {name} 回复被拦截（{reason}），转人工")
+            return
+
         time.sleep(random.uniform(*REPLY_DELAY))
         result = self.worker.submit(lambda ctx: im.send(ctx.page, text))
         if result.get("ok"):
@@ -204,29 +214,39 @@ class Service:
         if record.get("shipped_at"):
             return  # 幂等：一个会话只自动发一次
 
-        secret = self.store.take_secret(item["item_id"])
+        note = item.get("ship_note") or "已付款成功，这是你的兑换码：{secret}"
+
+        if item.get("dry_run"):
+            # 演练只预览，不消耗卡密（否则每轮轮询都会把池子抽干）
+            preview = self.store.peek_secret(item["item_id"])
+            if not preview:
+                self.store.add_message(name, "dry", "", "ship", "卡密池为空，转人工")
+                self.store.set_conversation(name, mode="manual")
+                log(f"[ship] {name} 卡密池为空")
+                return
+            text = note.replace("{secret}", preview)
+            self.store.add_message(
+                name, "dry", guard.scrub(text, [preview]), "ship", "dry-run 拟发货（未消耗卡密）"
+            )
+            log(f"[ship] {name} dry-run 拟发货")
+            return
+
+        secret = self.store.take_secret(item["item_id"], chat=name)
         if not secret:
             self.store.add_message(name, "dry", "", "ship", "卡密池为空，转人工")
             self.store.set_conversation(name, mode="manual")
             log(f"[ship] {name} 卡密池为空")
             return
-
-        note = item.get("ship_note") or "已付款成功，这是你的兑换码：{secret}"
         text = note.replace("{secret}", secret)
-
-        if item.get("dry_run"):
-            self.store.add_message(name, "dry", text, "ship", "dry-run 拟发货")
-            log(f"[ship] {name} dry-run 拟发货")
-            return
 
         result = self.worker.submit(lambda ctx: im.send(ctx.page, text))
         if result.get("ok"):
-            self.store.add_message(name, "out", text, "ship", "自动发货")
+            self.store.add_message(name, "out", guard.scrub(text, [secret]), "ship", "自动发货")
             self.store.set_conversation(name, shipped_at=time.time())
             self._count_sent()
             log(f"[ship] {name} 已发货")
         else:
-            self.store.add_message(name, "dry", text, "ship", f"发货失败: {result}")
+            self.store.add_message(name, "dry", "", "ship", f"发货失败: {result}")
             # 卡密退回池子
             self.store.add_secrets(item["item_id"], [secret])
 
