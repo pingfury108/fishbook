@@ -10,13 +10,16 @@
 
   return {
     url: location.href,
-    conversations: items.map((el) => {
+    conversations: items.map((el, idx) => {
+      const img = el.querySelector("img");
       const badge = el.querySelector(".ant-badge-count");
       const unread = badge ? parseInt(badge.textContent, 10) || 1 : 0;
       const parts = leaves(el)
         .map((n) => n.textContent.trim())
         .filter((t) => t !== (badge ? badge.textContent : "") && !TIME_RE.test(t));
       return {
+        idx: idx,
+        avatar: img ? img.src : "",
         name: parts[0] || "",
         // 有的会话行会在昵称和消息之间插入商品标题，全部保留给 Python 侧匹配
         extras: parts.slice(1, 4).map((t) => t.slice(0, 60)),

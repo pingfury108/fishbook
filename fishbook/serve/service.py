@@ -107,58 +107,129 @@ class Service:
     def _tick(self) -> None:
         snapshot = self.worker.submit(lambda ctx: im.scan(ctx.page))
         conversations = snapshot.get("conversations") or []
+        self.worker.submit(lambda ctx: im.enable_network(ctx.page))
 
-        # 全量落库，UI 会话列表始终有数据；顺手把没关联商品的会话补上关联
+        # 1) 全量落库（只刷未读/预览），并记下每行的 idx 供点击用
         managed = self.store.managed_items()
-        for conv in conversations:
-            existing = self.store.get_conversation(conv["name"]) or {}
-            self.store.upsert_conversation(
-                conv["name"], conv.get("unread") or 0, conv.get("preview") or ""
+        rows = []
+        for idx, conv in enumerate(conversations):
+            nick = conv.get("name") or ""
+            avatar = conv.get("avatar") or ""
+            key = self.store.upsert_scan(
+                nick, avatar, conv.get("unread") or 0, conv.get("preview") or ""
             )
-            if existing and existing.get("mode") == "manual":
-                self.store.set_conversation(conv["name"], mode="manual")
-            if not (existing.get("item_id") or ""):
-                guessed = self._guess_item(conv, managed)
-                if guessed:
-                    self.store.set_conversation(conv["name"], item_id=guessed)
-                    log(f"[watcher] {conv['name']} 自动关联到商品 {guessed}")
-
-        # 新消息判定：不能只看未读——IM 标签一直开着，新消息会被页面立刻标成已读。
-        # 所以用「预览文本变了」作为主信号，未读徽标只作为补充。
-        targets = []
-        for conv in conversations:
-            name = conv["name"]
-            if self._is_system_chat(name):
-                continue
-            record = self.store.get_conversation(name) or {}
-            preview = (conv.get("preview") or "").strip()
-            prev = (record.get("last_msg") or "").strip()
-            fresh = bool(conv.get("unread")) or (preview and preview != prev)
-            if not fresh:
-                continue
-
-            item_id = record.get("item_id") or ""
-            item = self.store.get_item(item_id) if item_id else None
-            if not item or not item.get("managed"):
-                log(f"[watcher] 跳过 {name}: 未关联到已接管商品")
-                continue
+            record = self.store.get_conversation(key) or {}
             if record.get("mode") == "manual":
-                log(f"[watcher] 跳过 {name}: 人工模式（UI 里可切回自动）")
                 continue
-            targets.append((conv, item))
+            rows.append({"idx": idx, "conv": conv, "key": key, "record": record})
 
-        if not targets:
+        # 2) 候选：未绑定 sessionId，或预览变了 / 有未读
+        candidates = []
+        for row in rows:
+            conv, record = row["conv"], row["record"]
+            if self._is_system_chat(conv.get("name") or ""):
+                continue
+            preview = (conv.get("preview") or "").strip()
+            fresh = (
+                bool(conv.get("unread"))
+                or not record.get("session_id")
+                or preview != (record.get("last_seen_preview") or "")
+            )
+            if fresh:
+                candidates.append(row)
+
+        if not candidates:
             return
 
-        for conv, item in targets:
+        # 3) 逐个：绑定 → 同步消息 → 新入站才处理（每轮最多 3 个，控制页面操作量）
+        for row in candidates[:3]:
             try:
-                self._handle(conv, item)
-            finally:
-                # 记住这一轮的预览，避免下一轮重复处理（含自己刚发出去的消息）
-                self.store.set_conversation(
-                    conv["name"], last_msg=(conv.get("preview") or "").strip()
-                )
+                self._sync_and_maybe_reply(row, managed)
+            except Exception as exc:  # noqa: BLE001 - 单个会话失败不影响其他
+                log(f"[watcher] {row['conv'].get('name')} 处理失败: {str(exc)[:120]}")
             sleep_jitter()
+
+    def _sync_and_maybe_reply(self, row: dict, managed: list[dict]) -> None:
+        conv = row["conv"]
+        nick = conv.get("name") or ""
+        opened = self.worker.submit(lambda ctx: im.open_by_index(ctx.page, row["idx"]))
+        if not opened.get("ok"):
+            log(f"[watcher] 打开会话失败 {nick}: {opened}")
+            return
+
+        conv_key = self.store.bind(
+            nick,
+            conv.get("avatar") or "",
+            opened.get("session_id") or "",
+            opened.get("item_id") or "",
+        )
+        record = self.store.get_conversation(conv_key) or {}
+
+        # 商品：headinfo 给的 itemId 是权威值，优先于按标题猜的结果
+        item_id = record.get("item_id") or ""
+        from_headinfo = opened.get("item_id") or ""
+        if from_headinfo and from_headinfo != item_id:
+            if item_id:
+                log(f"[watcher] {nick} 商品以 headinfo 为准: {item_id} → {from_headinfo}")
+            self.store.set_conversation(conv_key, item_id=from_headinfo)
+            record = self.store.get_conversation(conv_key) or record
+            item_id = from_headinfo
+        elif not item_id:
+            guessed = self._guess_item(conv, managed)
+            if guessed:
+                self.store.set_conversation(conv_key, item_id=guessed)
+                record = self.store.get_conversation(conv_key) or record
+                item_id = guessed
+
+        item = self.store.get_item(item_id) if item_id else None
+        if not item or not item.get("managed"):
+            log(f"[watcher] 跳过 {nick}: 未关联到已接管商品")
+            return
+        if record.get("mode") == "manual":
+            log(f"[watcher] 跳过 {nick}: 人工模式（UI 里可切回自动）")
+            return
+
+        # 消息同步（后缀对齐，DB 是真相源）
+        page_msgs = (
+            self.worker.submit(lambda ctx: im.read(ctx.page, limit=20)).get("messages") or []
+        )
+        added = self.store.sync_messages(conv_key, nick, page_msgs)
+        self.store.set_conversation(
+            conv_key, last_seen_preview=(conv.get("preview") or "").strip(), unread=0
+        )
+        if not added:
+            return
+
+        inbound = [m for m in added if m["direction"] == "other"]
+        if not inbound:
+            log(f"[watcher] {nick} 只有自己发出的新消息，跳过")
+            return
+
+        last_in = inbound[-1]
+        answered = record.get("answered_upto") or 0
+        if last_in["id"] <= answered:
+            log(f"[watcher] {nick} 该消息已处理过，跳过")
+            return
+
+        log(f"[watcher] {nick} 新消息: {last_in['text'][:40]}")
+        # DB 行 → agent 需要的历史格式
+        history = [
+            {"side": "out" if row["direction"] == "out" else "other", "text": row["content"] or ""}
+            for row in self.store.tail_messages(conv_key, 20)
+        ]
+        history = [
+            {"side": "me" if h["side"] == "out" else "other", "text": h["text"]} for h in history
+        ]
+        if not history:
+            return
+        settings = self.settings()
+        secrets = self.store.item_secrets(item["item_id"])
+        decision = agent.decide(item, history, settings, secrets=secrets)
+        self._apply_decision(conv_key, nick, item, decision)
+        self.store.set_conversation(conv_key, answered_upto=last_in["id"])
+
+        if guard.is_payment_intent(last_in["text"]):
+            self._maybe_ship(conv_key, nick, item)
 
     @staticmethod
     def _is_system_chat(name: str) -> bool:
@@ -185,126 +256,128 @@ class Service:
             return managed[0]["item_id"]
         return ""
 
-    def _handle(self, conv: dict, item: dict) -> None:
-        name = conv["name"]
-        opened = self.worker.submit(lambda ctx: im.open_conversation(ctx.page, name))
-        if not opened.get("ok"):
-            log(f"[watcher] 打开会话失败 {name}: {opened}")
-            return
-        snapshot = self.worker.submit(lambda ctx: im.read(ctx.page, limit=20))
-        history = snapshot.get("messages") or []
-        if not history:
-            log(f"[watcher] {name} 读不到消息")
-            return
-        last = history[-1]
-        log(f"[watcher] {name} 最后一条: {last['side']} | {last['text'][:40]}")
-        if last["side"] != "other":
-            log(f"[watcher] {name} 最后一条是自己发的，跳过")
-            return
+    def _live_allowed(self, item: dict) -> bool:
+        """发送开关：必须显式关掉演练，且全局 live 开关未关。缺省一律不发。"""
+        if int(item.get("dry_run") or 0) != 0:
+            return False
+        return (self.store.get_setting("live", "1") or "1") == "1"
 
-        self.store.set_conversation(
-            name, unread=0, last_msg=history[-1]["text"][:60], last_msg_at=time.time()
-        )
-        self.store.add_message(name, "in", history[-1]["text"])
-
-        settings = self.settings()
+    def _send(
+        self,
+        conv_key: str,
+        nick: str,
+        item: dict,
+        text: str,
+        decision: str,
+        detail: str = "",
+        purpose: str = "reply",
+    ) -> bool:
+        """唯一发送出口：演练/熔断/护栏任一不通过都只记录不发送。"""
         secrets = self.store.item_secrets(item["item_id"])
-        decision = agent.decide(item, history, settings, secrets=secrets)
-        self._apply_decision(name, item, decision)
 
-        # 自动发货：LLM 判断买家已付款
-        if decision.get("decision") == "llm" and '"payment"' in str(decision.get("detail", "")):
-            self._maybe_ship(name, item)
+        if not self._live_allowed(item):
+            reason = (
+                "dry-run 拟发送" if int(item.get("dry_run") or 0) != 0 else "全局 live 开关关闭"
+            )
+            self.store.add_message(nick, "dry", text, decision, reason, conv_key=conv_key)
+            log(f"[send] {nick} 未发送（{reason}）: {text[:40]}")
+            return False
 
-    def _apply_decision(self, name: str, item: dict, decision: dict) -> None:
+        if self.paused.is_set():
+            self.store.add_message(nick, "dry", text, decision, "熔断中，未发送", conv_key=conv_key)
+            log(f"[send] {nick} 熔断中，未发送")
+            return False
+
+        if self._rate_limited():
+            self.store.add_message(
+                nick, "dry", text, decision, "触发每日上限，未发送", conv_key=conv_key
+            )
+            return False
+
+        reason = guard.check_outgoing(text, guard.item_sources(item), secrets)
+        if reason:
+            self.store.add_message(
+                nick, "dry", "", decision, f"发送前拦截：{reason}", conv_key=conv_key
+            )
+            self.store.set_conversation(conv_key, mode="manual")
+            log(f"[guard] {nick} 回复被拦截（{reason}），转人工")
+            return False
+
+        time.sleep(random.uniform(*REPLY_DELAY))
+        result = self.worker.submit(lambda ctx: im.send(ctx.page, text))
+        if result.get("ok"):
+            self.store.add_message(
+                nick, "out", guard.scrub(text, secrets), decision, detail, conv_key=conv_key
+            )
+            self._count_sent()
+            log(f"[send] {nick} 已发送（{purpose}）: {text[:40]}")
+            return True
+
+        self.store.add_message(
+            nick, "dry", text, decision, f"发送失败: {result}", conv_key=conv_key
+        )
+        log(f"[send] {nick} 发送失败: {result}")
+        return False
+
+    def _apply_decision(self, conv_key: str, nick: str, item: dict, decision: dict) -> None:
         action = decision["action"]
         if action == "ignore":
             return
 
         if action == "human":
             self.store.add_message(
-                name, "dry", "", decision["decision"], decision.get("detail", "")
+                nick, "dry", "", decision["decision"], decision.get("detail", ""), conv_key=conv_key
             )
-            self.store.set_conversation(name, mode="manual")
-            log(f"[agent] {name} 转人工: {decision.get('detail', '')[:60]}")
+            self.store.set_conversation(conv_key, mode="manual")
+            log(f"[agent] {nick} 转人工: {decision.get('detail', '')[:60]}")
             return
 
         text = decision["text"]
-        dry = bool(item.get("dry_run"))
-        if dry:
-            self.store.add_message(name, "dry", text, decision["decision"], "dry-run 拟发送")
-            log(f"[agent] {name} dry-run 拟回复: {text[:40]}")
-            return
-
-        if self._rate_limited():
-            self.store.add_message(name, "dry", text, decision["decision"], "触发每日上限，未发送")
-            return
-
-        # 发送前最后一道：卡密 / 手机号 / 站外链接 / 疑似卡密串
-        secrets = self.store.item_secrets(item["item_id"])
-        reason = guard.check_outgoing(text, guard.item_sources(item), secrets)
-        if reason:
-            self.store.add_message(name, "dry", "", decision["decision"], f"发送前拦截：{reason}")
-            self.store.set_conversation(name, mode="manual")
-            log(f"[guard] {name} 回复被拦截（{reason}），转人工")
-            return
-
-        time.sleep(random.uniform(*REPLY_DELAY))
-        result = self.worker.submit(lambda ctx: im.send(ctx.page, text))
-        if result.get("ok"):
-            self.store.add_message(
-                name, "out", text, decision["decision"], decision.get("detail", "")
-            )
-            self.store.set_conversation(name, replied_at=time.time(), unread=0)
-            self._count_sent()
-        else:
-            self.store.add_message(name, "dry", text, decision["decision"], f"发送失败: {result}")
-            log(f"[agent] {name} 发送失败: {result}")
+        if self._send(conv_key, nick, item, text, decision["decision"], decision.get("detail", "")):
+            self.store.set_conversation(conv_key, replied_at=time.time(), unread=0)
 
     # ---- 发货 ----
 
-    def _maybe_ship(self, name: str, item: dict) -> None:
+    def _maybe_ship(self, conv_key: str, nick: str, item: dict) -> None:
         if not item.get("auto_ship"):
             return
-        record = self.store.get_conversation(name) or {}
+        record = self.store.get_conversation(conv_key) or {}
         if record.get("shipped_at"):
             return  # 幂等：一个会话只自动发一次
 
         note = item.get("ship_note") or "已付款成功，这是你的兑换码：{secret}"
 
-        if item.get("dry_run"):
-            # 演练只预览，不消耗卡密（否则每轮轮询都会把池子抽干）
+        if int(item.get("dry_run") or 0) != 0:
             preview = self.store.peek_secret(item["item_id"])
             if not preview:
-                self.store.add_message(name, "dry", "", "ship", "卡密池为空，转人工")
-                self.store.set_conversation(name, mode="manual")
-                log(f"[ship] {name} 卡密池为空")
+                self.store.add_message(
+                    nick, "dry", "", "ship", "卡密池为空，转人工", conv_key=conv_key
+                )
+                self.store.set_conversation(conv_key, mode="manual")
                 return
             text = note.replace("{secret}", preview)
             self.store.add_message(
-                name, "dry", guard.scrub(text, [preview]), "ship", "dry-run 拟发货（未消耗卡密）"
+                nick,
+                "dry",
+                guard.scrub(text, [preview]),
+                "ship",
+                "dry-run 拟发货（未消耗卡密）",
+                conv_key=conv_key,
             )
-            log(f"[ship] {name} dry-run 拟发货")
+            log(f"[ship] {nick} dry-run 拟发货")
             return
 
-        secret = self.store.take_secret(item["item_id"], chat=name)
+        secret = self.store.take_secret(item["item_id"], chat=nick)
         if not secret:
-            self.store.add_message(name, "dry", "", "ship", "卡密池为空，转人工")
-            self.store.set_conversation(name, mode="manual")
-            log(f"[ship] {name} 卡密池为空")
+            self.store.add_message(nick, "dry", "", "ship", "卡密池为空，转人工", conv_key=conv_key)
+            self.store.set_conversation(conv_key, mode="manual")
+            log(f"[ship] {nick} 卡密池为空")
             return
         text = note.replace("{secret}", secret)
-
-        result = self.worker.submit(lambda ctx: im.send(ctx.page, text))
-        if result.get("ok"):
-            self.store.add_message(name, "out", guard.scrub(text, [secret]), "ship", "自动发货")
-            self.store.set_conversation(name, shipped_at=time.time())
-            self._count_sent()
-            log(f"[ship] {name} 已发货")
+        if self._send(conv_key, nick, item, text, "ship", "自动发货", purpose="ship"):
+            self.store.set_conversation(conv_key, shipped_at=time.time())
         else:
-            self.store.add_message(name, "dry", "", "ship", f"发货失败: {result}")
-            # 卡密退回池子
-            self.store.add_secrets(item["item_id"], [secret])
+            self.store.add_secrets(item["item_id"], [secret])  # 没发出去就退回池子
 
     # ---- 护栏 ----
 

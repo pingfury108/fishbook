@@ -351,6 +351,8 @@ def cmd_serve(args) -> int:
     from .serve.app import create_app
     from .serve.service import Service
 
+    os.environ.setdefault("FISHBOOK_LOG", ".fishbook/serve.log")
+
     cdp_raw = args.cdp or os.environ.get("FISHBOOK_CDP") or None
     base, _ = cdp.normalize_endpoint(cdp_raw)
     service = Service(

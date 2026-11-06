@@ -96,6 +96,14 @@ def looks_like_token(text: str, sources: str) -> str | None:
     return None
 
 
+PAYMENT_RE = re.compile(r"(已拍|拍下|付款|已付|支付成功|买下|下单了|拍好了)", re.IGNORECASE)
+
+
+def is_payment_intent(text: str) -> bool:
+    """买家是否在说「我付款了」。确定性判断，不依赖模型。"""
+    return bool(PAYMENT_RE.search(text or ""))
+
+
 def classify_inbound(text: str) -> str | None:
     """买家消息里的高风险意图：套卡密 / 提示注入。命中就转人工，不交给模型。"""
     raw = text or ""

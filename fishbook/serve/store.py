@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -26,27 +27,33 @@ CREATE TABLE IF NOT EXISTS managed_items (
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
-  name TEXT PRIMARY KEY,              -- 买家昵称（IM 页无会话 id，v1 用昵称）
-  item_id TEXT DEFAULT '',            -- 关联的托管商品
+  conv_key TEXT PRIMARY KEY,          -- sessionId（准确 ID）；未绑定时是 tmp:<nick>#<avatar>
+  session_id TEXT DEFAULT '',         -- headinfo 拿到的会话 id
+  nick TEXT DEFAULT '',               -- 展示用（页面上的打码昵称）
+  avatar TEXT DEFAULT '',
+  item_id TEXT DEFAULT '',            -- 关联的托管商品（headinfo 直接给）
   mode TEXT DEFAULT 'auto',           -- auto / manual
   unread INTEGER DEFAULT 0,
   preview TEXT DEFAULT '',            -- 会话行当前预览（每轮刷新）
-  last_msg TEXT DEFAULT '',           -- 已处理到的预览（用于判断有没有新消息）
+  last_seen_preview TEXT DEFAULT '',  -- 已处理到的预览（触发门控）
+  answered_upto INTEGER DEFAULT 0,    -- 已回复到 messages.id（水位）
   last_msg_at REAL DEFAULT 0,
-  replied_at REAL DEFAULT 0,          -- agent 上次回复时间
-  shipped_at REAL DEFAULT 0,          -- 本会话已自动发货时间（幂等）
+  replied_at REAL DEFAULT 0,
+  shipped_at REAL DEFAULT 0,
   updated_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat TEXT NOT NULL,                 -- 会话（买家昵称）
+  conv_key TEXT DEFAULT '',           -- 属于哪个会话
+  chat TEXT DEFAULT '',               -- 展示用昵称
   direction TEXT,                     -- in / out / dry
   content TEXT,
-  decision TEXT DEFAULT '',           -- faq / price_floor / llm / llm_human / manual / ship / gate
-  detail TEXT DEFAULT '',             -- 决策依据（JSON 或说明）
+  decision TEXT DEFAULT '',           -- llm / gate / manual / ship
+  detail TEXT DEFAULT '',             -- 决策依据
   ts REAL
 );
+CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_key, id);
 
 CREATE TABLE IF NOT EXISTS ship_pool (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +71,7 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 
-def now() -> float:
+def now_ts() -> float:
     return time.time()
 
 
@@ -81,13 +88,39 @@ class Store:
     def _migrate(self) -> None:
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(managed_items)")}
         conv_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(conversations)")}
-        if "preview" not in conv_cols:
+        if "name" in conv_cols and "conv_key" not in conv_cols:
+            # v1 → v2：name 主键改成 conv_key（旧数据挂在 tmp:<nick> 下，绑定后改写）
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS conversations_v2 (
+                  conv_key TEXT PRIMARY KEY, session_id TEXT DEFAULT '',
+                  nick TEXT DEFAULT '', avatar TEXT DEFAULT '', item_id TEXT DEFAULT '',
+                  mode TEXT DEFAULT 'auto', unread INTEGER DEFAULT 0,
+                  preview TEXT DEFAULT '', last_seen_preview TEXT DEFAULT '',
+                  answered_upto INTEGER DEFAULT 0,
+                  last_msg_at REAL DEFAULT 0, replied_at REAL DEFAULT 0,
+                  shipped_at REAL DEFAULT 0, updated_at REAL
+                );
+                INSERT OR IGNORE INTO conversations_v2
+                  (conv_key, nick, item_id, mode, unread, preview, last_seen_preview, updated_at)
+                  SELECT 'tmp:' || name, name, COALESCE(item_id, ''), COALESCE(mode, 'auto'),
+                         COALESCE(unread, 0), COALESCE(preview, ''), COALESCE(last_msg, ''),
+                         COALESCE(updated_at, 0)
+                  FROM conversations;
+                DROP TABLE conversations;
+                ALTER TABLE conversations_v2 RENAME TO conversations;
+                """
+            )
+        if "preview" not in conv_cols and "conv_key" in conv_cols:
             self._conn.execute("ALTER TABLE conversations ADD COLUMN preview TEXT DEFAULT ''")
         for col in ("item_desc", "item_status"):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE managed_items ADD COLUMN {col} TEXT DEFAULT ''")
         if "fetched_at" not in cols:
             self._conn.execute("ALTER TABLE managed_items ADD COLUMN fetched_at REAL DEFAULT 0")
+        msg_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(messages)")}
+        if "conv_key" not in msg_cols:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN conv_key TEXT DEFAULT ''")
         if "guide" not in cols:
             self._conn.execute("ALTER TABLE managed_items ADD COLUMN guide TEXT DEFAULT ''")
         # 旧字段合进 guide：prompt + FAQ 文本化
@@ -130,7 +163,7 @@ class Store:
             self._conn.execute(
                 "INSERT INTO managed_items(item_id, title, price, created_at) VALUES(?, ?, ?, ?) "
                 "ON CONFLICT(item_id) DO UPDATE SET title=excluded.title, price=excluded.price",
-                (item_id, title, price, now()),
+                (item_id, title, price, now_ts()),
             )
 
     def update_item(self, item_id: str, fields: dict) -> None:
@@ -180,49 +213,119 @@ class Store:
 
     # ---- conversations ----
 
-    def upsert_conversation(self, name: str, unread: int = 0, preview: str = "") -> None:
-        """刷新未读与当前预览；last_msg（已处理到的预览）保持不变。"""
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO conversations(name, unread, preview, last_msg_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?) "
-                "ON CONFLICT(name) DO UPDATE SET unread=excluded.unread, "
-                "preview=excluded.preview, last_msg_at=excluded.last_msg_at, updated_at=excluded.updated_at",
-                (name, unread, preview, now(), now()),
-            )
+    @staticmethod
+    def tmp_key(nick: str, avatar: str = "") -> str:
+        """sessionId 还没拿到时的临时 key（昵称 + 头像片段，尽量不撞）。"""
+        tail = (avatar or "").rstrip("/").split("/")[-1][:24]
+        return f"tmp:{nick}#{tail}"
 
-    def get_conversation(self, name: str) -> dict | None:
-        row = self._conn.execute("SELECT * FROM conversations WHERE name=?", (name,)).fetchone()
+    def find_conversation(self, nick: str, avatar: str = "") -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM conversations WHERE session_id!='' AND nick=? AND avatar=? LIMIT 1",
+            (nick, avatar),
+        ).fetchone()
+        if row:
+            return dict(row)
+        row = self._conn.execute(
+            "SELECT * FROM conversations WHERE conv_key=? LIMIT 1", (self.tmp_key(nick, avatar),)
+        ).fetchone()
         return dict(row) if row else None
 
-    def set_conversation(self, name: str, **fields) -> None:
+    def get_conversation(self, conv_key: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM conversations WHERE conv_key=?", (conv_key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_scan(self, nick: str, avatar: str, unread: int, preview: str) -> str:
+        """刷新会话行的未读/预览（不动 last_seen_preview），返回 conv_key。"""
+        record = self.find_conversation(nick, avatar)
+        now = now_ts()
+        if record:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    "UPDATE conversations SET unread=?, preview=?, avatar=?, updated_at=?, "
+                    "last_msg_at=? WHERE conv_key=?",
+                    (unread, preview, avatar, now, now, record["conv_key"]),
+                )
+            return record["conv_key"]
+        key = self.tmp_key(nick, avatar)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO conversations(conv_key, nick, avatar, unread, preview, "
+                "updated_at, last_msg_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (key, nick, avatar, unread, preview, now, now),
+            )
+        return key
+
+    def bind(self, nick: str, avatar: str, session_id: str, item_id: str = "") -> str:
+        """把 tmp key 升级成 sessionId；已绑定过就只更新商品信息。"""
+        existing = None
+        if session_id:
+            row = self._conn.execute(
+                "SELECT * FROM conversations WHERE session_id=? LIMIT 1", (session_id,)
+            ).fetchone()
+            existing = dict(row) if row else None
+        if existing is None:
+            existing = self.find_conversation(nick, avatar)
+
+        with self._lock, self._conn:
+            if existing and session_id and existing["conv_key"] != session_id:
+                old_key = existing["conv_key"]
+                self._conn.execute(
+                    "UPDATE conversations SET conv_key=?, session_id=?, nick=?, avatar=? WHERE conv_key=?",
+                    (session_id, session_id, nick, avatar, old_key),
+                )
+                # 消息跟着搬家
+                self._conn.execute(
+                    "UPDATE messages SET conv_key=? WHERE conv_key=?", (session_id, old_key)
+                )
+                existing = self.get_conversation(session_id)
+            elif existing:
+                self._conn.execute(
+                    "UPDATE conversations SET session_id=COALESCE(NULLIF(?,''), session_id), "
+                    "nick=?, avatar=? WHERE conv_key=?",
+                    (session_id, nick, avatar, existing["conv_key"]),
+                )
+                existing = self.get_conversation(existing["conv_key"])
+            else:
+                key = session_id or self.tmp_key(nick, avatar)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO conversations(conv_key, session_id, nick, avatar, updated_at) "
+                    "VALUES(?, ?, ?, ?, ?)",
+                    (key, session_id, nick, avatar, now_ts()),
+                )
+                existing = self.get_conversation(key)
+
+            if item_id and existing and not existing.get("item_id"):
+                self._conn.execute(
+                    "UPDATE conversations SET item_id=? WHERE conv_key=?",
+                    (item_id, existing["conv_key"]),
+                )
+                existing = self.get_conversation(existing["conv_key"])
+        return existing["conv_key"]
+
+    def set_conversation(self, conv_key: str, **fields) -> None:
         allowed = {
             "item_id",
             "mode",
             "unread",
             "replied_at",
             "shipped_at",
-            "last_msg",
+            "preview",
+            "last_seen_preview",
+            "answered_upto",
             "last_msg_at",
         }
         keys = [k for k in fields if k in allowed]
         if not keys:
             return
-        base = ", ".join(f"{k}=?" for k in keys)
+        sets = ", ".join(f"{k}=?" for k in keys)
         with self._lock, self._conn:
-            row = self._conn.execute("SELECT 1 FROM conversations WHERE name=?", (name,)).fetchone()
-            if row:
-                self._conn.execute(
-                    f"UPDATE conversations SET {base}, updated_at=? WHERE name=?",
-                    [fields[k] for k in keys] + [now(), name],
-                )
-            else:
-                cols = "name, " + ", ".join(keys) + ", updated_at"
-                marks = ", ".join("?" for _ in range(len(keys) + 2))
-                self._conn.execute(
-                    f"INSERT INTO conversations({cols}) VALUES({marks})",
-                    [name] + [fields[k] for k in keys] + [now()],
-                )
+            self._conn.execute(
+                f"UPDATE conversations SET {sets}, updated_at=? WHERE conv_key=?",
+                [fields[k] for k in keys] + [now_ts(), conv_key],
+            )
 
     def list_conversations(self) -> list[dict]:
         rows = self._conn.execute(
@@ -230,27 +333,79 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # ---- messages / audit ----
+    # ---- messages ----
+
+    def tail_messages(self, conv_key: str, limit: int = 20) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE conv_key=? ORDER BY id DESC LIMIT ?", (conv_key, limit)
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def sync_messages(self, conv_key: str, chat: str, page_msgs: list[dict]) -> list[dict]:
+        """按「后缀对齐」把页面消息增量写库，返回新插入的行。
+
+        page_msgs: [{"side": "me"|"other", "text": str}]，按页面顺序（旧→新）。
+        """
+        page = [(m.get("side") or "", (m.get("text") or "").strip()) for m in page_msgs]
+        if not page:
+            return []
+        stored = self.tail_messages(conv_key, len(page))
+        # 页面用 other/me，DB 用 in/out/dry —— 统一成 other/me 再比
+        stored_seq = [
+            ("me" if m["direction"] in ("out", "dry") else "other", (m["content"] or "").strip())
+            for m in stored
+        ]
+
+        k = 0
+        for size in range(min(len(page), len(stored_seq)), 0, -1):
+            if stored_seq[-size:] == page[-size:]:
+                k = size
+                break
+
+        new_items = page[: len(page) - k] if k else page
+        if k == 0 and stored_seq:
+            log_line = f"[sync] {conv_key} 历史断层，整段重灌 {len(page)} 条"
+            print(log_line, file=sys.stderr, flush=True)
+
+        added: list[dict] = []
+        with self._lock, self._conn:
+            for direction, text in new_items:
+                cur = self._conn.execute(
+                    "INSERT INTO messages(conv_key, chat, direction, content, ts) VALUES(?, ?, ?, ?, ?)",
+                    (conv_key, chat, "in" if direction == "other" else "out", text, now_ts()),
+                )
+                added.append({"id": cur.lastrowid, "direction": direction, "text": text})
+        return added
 
     def add_message(
-        self, chat: str, direction: str, content: str, decision: str = "", detail: dict | str = ""
+        self,
+        chat: str,
+        direction: str,
+        content: str,
+        decision: str = "",
+        detail: dict | str = "",
+        conv_key: str = "",
     ) -> None:
+        """写一条审计消息（direction: in / out / dry）。"""
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO messages(chat, direction, content, decision, detail, ts) VALUES(?, ?, ?, ?, ?, ?)",
+                "INSERT INTO messages(conv_key, chat, direction, content, decision, detail, ts) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
                 (
+                    conv_key or chat,
                     chat,
                     direction,
                     content,
                     decision,
                     detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False),
-                    now(),
+                    now_ts(),
                 ),
             )
 
-    def list_messages(self, chat: str, limit: int = 50) -> list[dict]:
+    def list_messages(self, conv_key: str, limit: int = 80) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT * FROM messages WHERE chat=? ORDER BY ts DESC, id DESC LIMIT ?", (chat, limit)
+            "SELECT * FROM messages WHERE conv_key=? OR chat=? ORDER BY id DESC LIMIT ?",
+            (conv_key, conv_key, limit),
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
@@ -289,7 +444,7 @@ class Store:
                 return None
             self._conn.execute(
                 "UPDATE ship_pool SET status='used', used_at=?, chat=? WHERE id=?",
-                (now(), chat, row["id"]),
+                (now_ts(), chat, row["id"]),
             )
             return row["content"]
 

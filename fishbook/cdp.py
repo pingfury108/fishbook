@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Self
 
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as ws_connect
 
 from .errors import CDPError, CommandTimeout, EndpointError
@@ -137,6 +138,7 @@ class CDP:
         self.ws_url = ws_url
         self._ws = None
         self._next_id = 0
+        self._events: list[dict] = []
 
     # ---- 生命周期 ----
 
@@ -199,7 +201,12 @@ class CDP:
             except ValueError as exc:
                 raise CDPError(f"{method} 收到非 JSON 帧: {raw[:200]!r}") from exc
             if msg.get("id") != msg_id:
-                continue  # 事件帧或过期响应，直接丢弃
+                # 事件帧先缓存（Network.requestWillBeSent 之类），供 take_events 取
+                if "method" in msg:
+                    self._events.append(msg["params"] | {"__method": msg["method"]})
+                    if len(self._events) > 500:
+                        del self._events[:200]
+                continue
             if "error" in msg:
                 raise CDPError(f"{method} 返回错误: {msg['error']}")
             return msg.get("result") or {}
@@ -237,6 +244,35 @@ class CDP:
             text = exception.get("description") or details.get("text") or "JS 执行异常"
             raise CDPError(f"JS 执行异常: {text}")
         return (result.get("result") or {}).get("value")
+
+    def pump(self, seconds: float = 1.0) -> None:
+        """主动抽一段时间的帧并缓存事件（没有在途命令时也能收到事件）。"""
+        deadline = time.monotonic() + seconds
+        while True:
+            remain = deadline - time.monotonic()
+            if remain <= 0 or self._ws is None:
+                return
+            try:
+                raw = self._ws.recv(timeout=remain)
+            except TimeoutError:
+                return
+            except ConnectionClosed:
+                return
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if "method" in msg and "id" not in msg:
+                self._events.append(msg["params"] | {"__method": msg["method"]})
+                if len(self._events) > 500:
+                    del self._events[:200]
+
+    def take_events(self, method: str) -> list[dict]:
+        """取走指定方法的缓冲事件。"""
+        picked = [e for e in self._events if e.get("__method") == method]
+        if picked:
+            self._events = [e for e in self._events if e.get("__method") != method]
+        return picked
 
     # ---- 便捷方法 ----
 

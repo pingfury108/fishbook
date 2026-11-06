@@ -442,10 +442,11 @@ async function renderConvs(st) {
     const unreadBadge = c.unread ? `<span class="badge blue">${c.unread} 未读</span>` : "";
     const item = items.find((x) => x.item_id === c.item_id);
     return `
-    <div class="conv-row" onclick="openChat('${esc(c.name)}')">
-      <div class="avatar">${esc(c.name.slice(0, 1))}</div>
+    <div class="conv-row" onclick="openChat('${esc(c.conv_key)}')">
+      <div class="avatar">${esc((c.nick || "?").slice(0, 1))}</div>
       <div class="conv-main">
-        <div class="conv-name">${esc(c.name)} ${modeBadge} ${unreadBadge}</div>
+        <div class="conv-name">${esc(c.nick || c.conv_key)} ${modeBadge} ${unreadBadge}
+          ${c.session_id ? '<span class="badge gray">已绑定</span>' : '<span class="badge amber">未绑定</span>'}</div>
         <div class="conv-preview">${esc(c.preview || c.last_msg || "（暂无消息）")}</div>
       </div>
       <div>${item
@@ -478,22 +479,27 @@ async function renderConvs(st) {
 async function assign() {
   const name = $("#convName").value.trim();
   if (!name) return toast("买家昵称必填");
-  await api("/api/conversations/" + encodeURIComponent(name) + "/item",
+  const st = await api("/api/status");
+  const conv = st.conversations.find((c) => (c.nick || "").includes(name) || c.conv_key === name);
+  if (!conv) return toast("找不到该会话，先等一轮扫描");
+  await api("/api/conversations/" + encodeURIComponent(conv.conv_key) + "/item",
     { method: "POST", body: JSON.stringify({ item_id: $("#convItem").value }) });
   toast("已关联");
   refresh();
 }
 
-async function setMode(name, mode) {
-  await api("/api/conversations/" + encodeURIComponent(name) + "/mode", { method: "POST", body: JSON.stringify({ mode }) });
+async function setMode(convKey, mode) {
+  await api("/api/conversations/" + encodeURIComponent(convKey) + "/mode",
+    { method: "POST", body: JSON.stringify({ mode }) });
   toast(mode === "manual" ? "已切人工，agent 停止介入" : "已切自动");
   refresh();
 }
 
-async function openChat(name) {
-  const msgs = await api("/api/messages/" + encodeURIComponent(name));
+async function openChat(convKey) {
+  const msgs = await api("/api/messages/" + encodeURIComponent(convKey));
   const st = await api("/api/status");
-  const conv = st.conversations.find((c) => c.name === name) || {};
+  const conv = st.conversations.find((c) => c.conv_key === convKey) || {};
+  const name = conv.nick || convKey;
   const flow = msgs.map((m) => {
     const who = m.direction === "in" ? "买家" : m.direction === "dry" ? "拟发送（演练）" : "我";
     const cls = m.direction;
@@ -505,38 +511,40 @@ async function openChat(name) {
   $("#dlgBody").innerHTML = `
     <div class="dlg-head">
       <b>${esc(name)}</b>
+      <span class="muted">${esc(convKey)}</span>
       <div style="display:flex; gap:6px; align-items:center">
         ${conv.mode === "manual" ? '<span class="badge red">人工</span>' : '<span class="badge green">自动</span>'}
-        <button class="btn sm" onclick="setMode('${esc(name)}','${conv.mode === "auto" ? "manual" : "auto"}')">${conv.mode === "auto" ? "转人工" : "转自动"}</button>
+        <button class="btn sm" onclick="setMode('${esc(convKey)}','${conv.mode === "auto" ? "manual" : "auto"}')">${conv.mode === "auto" ? "转人工" : "转自动"}</button>
         <button class="btn sm" onclick="$('#dlg').close()">✕</button>
       </div>
     </div>
     <div class="dlg-body">
       <div style="max-height:46vh; overflow:auto">${flow || '<div class="empty">暂无消息记录</div>'}</div>
       <label>关联到商品</label>
-      <select id="chatItem" onchange="reassign('${esc(name)}')"><option value="">（未关联）</option>${itemOpts}</select>
+      <select id="chatItem" onchange="reassign('${esc(convKey)}')"><option value="">（未关联）</option>${itemOpts}</select>
     </div>
     <div class="dlg-foot" style="justify-content:stretch; gap:8px">
       <input id="chatText" placeholder="手动回复（发送后该会话转人工）" style="flex:1"
-             onkeydown="if(event.key==='Enter')manualSend('${esc(name)}')">
-      <button class="btn primary" onclick="manualSend('${esc(name)}')">发送</button>
+             onkeydown="if(event.key==='Enter')manualSend('${esc(convKey)}')">
+      <button class="btn primary" onclick="manualSend('${esc(convKey)}')">发送</button>
     </div>`;
   $("#dlg").showModal();
 }
 
-async function reassign(name) {
-  await api("/api/conversations/" + encodeURIComponent(name) + "/item",
+async function reassign(convKey) {
+  await api("/api/conversations/" + encodeURIComponent(convKey) + "/item",
     { method: "POST", body: JSON.stringify({ item_id: $("#chatItem").value }) });
   toast("已关联");
 }
 
-async function manualSend(name) {
+async function manualSend(convKey) {
   const text = $("#chatText").value.trim();
   if (!text) return;
   try {
-    await api("/api/conversations/" + encodeURIComponent(name) + "/send", { method: "POST", body: JSON.stringify({ text }) });
+    await api("/api/conversations/" + encodeURIComponent(convKey) + "/send",
+      { method: "POST", body: JSON.stringify({ text }) });
     toast("已发送，会话转人工");
-    openChat(name);
+    openChat(convKey);
   } catch (e) { toast("失败: " + e.message); }
 }
 

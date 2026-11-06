@@ -134,39 +134,41 @@ def create_app(service: Service) -> FastAPI:
     def pool(item_id: str):
         return store.pool_stats(item_id)
 
-    @app.post("/api/conversations/{name}/item")
-    async def assign_item(name: str, request: Request):
+    @app.post("/api/conversations/{conv_key}/item")
+    async def assign_item(conv_key: str, request: Request):
         body = await request.json()
         item_id = str(body.get("item_id") or "").strip()
-        store.set_conversation(name, item_id=item_id)
+        store.set_conversation(conv_key, item_id=item_id)
         return {"ok": True}
 
-    @app.post("/api/conversations/{name}/mode")
-    async def set_mode(name: str, request: Request):
+    @app.post("/api/conversations/{conv_key}/mode")
+    async def set_mode(conv_key: str, request: Request):
         body = await request.json()
         mode = body.get("mode")
         if mode not in ("auto", "manual"):
             return JSONResponse({"ok": False, "error": "mode 只能是 auto/manual"}, status_code=400)
-        store.set_conversation(name, mode=mode)
+        store.set_conversation(conv_key, mode=mode)
         return {"ok": True}
 
-    @app.get("/api/messages/{name}")
-    def messages(name: str):
-        return store.list_messages(name)
+    @app.get("/api/messages/{conv_key}")
+    def messages(conv_key: str):
+        return store.list_messages(conv_key)
 
-    @app.post("/api/conversations/{name}/send")
-    async def manual_send(name: str, request: Request):
+    @app.post("/api/conversations/{conv_key}/send")
+    async def manual_send(conv_key: str, request: Request):
         body = await request.json()
         text = str(body.get("text") or "").strip()
         if not text:
             return JSONResponse({"ok": False, "error": "text 必填"}, status_code=400)
-        opened = service.worker.submit(lambda ctx: im.open_conversation(ctx.page, name))
+        record = store.get_conversation(conv_key) or {}
+        nick = record.get("nick") or conv_key
+        opened = service.worker.submit(lambda ctx: im.open_conversation(ctx.page, nick))
         if not opened.get("ok"):
             return JSONResponse({"ok": False, "error": f"打开会话失败: {opened}"}, status_code=400)
         result = service.worker.submit(lambda ctx: im.send(ctx.page, text))
         if result.get("ok"):
-            store.add_message(name, "out", text, "manual", "UI 手动发送")
-            store.set_conversation(name, mode="manual")
+            store.add_message(nick, "out", text, "manual", "UI 手动发送", conv_key=conv_key)
+            store.set_conversation(conv_key, mode="manual")
             return {"ok": True}
         return JSONResponse({"ok": False, "error": f"发送失败: {result}"}, status_code=500)
 

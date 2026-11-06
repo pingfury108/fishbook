@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import time
+import urllib.parse
 from pathlib import Path
 
 from ...cdp import CDP
@@ -19,6 +21,21 @@ _READ = (JS_DIR / "im_read.js").read_text(encoding="utf-8")
 _SEND = (JS_DIR / "im_send.js").read_text(encoding="utf-8")
 _VERIFY = (JS_DIR / "im_verify.js").read_text(encoding="utf-8")
 _FILL = (JS_DIR / "im_fill.js").read_text(encoding="utf-8")
+
+OPEN_BY_INDEX_JS = """((idx) => {
+  const items = [...document.querySelectorAll('[class*="conversation-item"]')].filter(
+    (el) => !el.className.includes("skeleton") && el.getBoundingClientRect().height > 0
+  );
+  const target = items[idx];
+  if (!target) return { error: "NO_ITEM", count: items.length };
+  const opts = { bubbles: true, cancelable: true, view: window };
+  target.dispatchEvent(new MouseEvent("mousedown", opts));
+  target.dispatchEvent(new MouseEvent("mouseup", opts));
+  target.dispatchEvent(new MouseEvent("click", opts));
+  return { ok: true, text: (target.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 30) };
+})("""
+
+HEADINFO_API = "message.headinfo"
 
 
 def ensure_page(cdp_endpoint: str, page: CDP | None) -> CDP:
@@ -63,6 +80,42 @@ def scan(page: CDP) -> dict:
     check_risk(page)
     result = page.evaluate(_SCAN, retries=2)
     return result if isinstance(result, dict) else {"conversations": []}
+
+
+def enable_network(page: CDP) -> None:
+    """打开 Network 域才能抓到页面自己的 headinfo 请求（拿 sessionId/itemId）。"""
+    with contextlib.suppress(Exception):
+        page.send("Network.enable", timeout=10)
+
+
+def open_by_index(page: CDP, idx: int, wait: float = 2.2) -> dict:
+    """按序号点开会话，并从页面自己发出的 headinfo 请求里读 sessionId / itemId。"""
+    page.take_events("Network.requestWillBeSent")
+    result = page.evaluate(OPEN_BY_INDEX_JS + str(int(idx)) + ")", retries=2)
+    if not isinstance(result, dict) or not result.get("ok"):
+        return result if isinstance(result, dict) else {"error": "BAD_RETURN"}
+
+    session_id, item_id = "", ""
+    deadline = time.time() + 8
+    first = True
+    while time.time() < deadline and not session_id:
+        page.pump(wait if first else 0.6)
+        first = False
+        for event in page.take_events("Network.requestWillBeSent"):
+            request = event.get("request") or {}
+            if HEADINFO_API not in request.get("url", ""):
+                continue
+            body = urllib.parse.unquote(request.get("postData") or "")
+            payload = body.split("data=")[-1]
+            try:
+                data = json.loads(payload)
+            except ValueError:
+                continue
+            session_id = str(data.get("sessionId") or "")
+            item_id = str(data.get("itemId") or "")
+            break
+    result.update({"session_id": session_id, "item_id": item_id})
+    return result
 
 
 def open_conversation(page: CDP, name: str) -> dict:

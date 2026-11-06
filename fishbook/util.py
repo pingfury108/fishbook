@@ -3,13 +3,27 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 import time
 
 
+def _log_file() -> str:
+    return os.environ.get("FISHBOOK_LOG", "")
+
+
 def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    """进度写 stderr；设了 FISHBOOK_LOG 时同时追加到文件（便于事后取证）。"""
+    line = f"{time.strftime('%H:%M:%S')} {message}"
+    print(line, file=sys.stderr, flush=True)
+    path = _log_file()
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
 
 
 def sleep_jitter() -> None:
