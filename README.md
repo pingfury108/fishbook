@@ -259,11 +259,13 @@ fishbook --cdp ... serve --poll-min 30 --poll-max 60 --state .fishbook/state.db
 | 消息气泡 | `[class*="scroll-container"]` 内 `[class*="message-text"]`，自己的带 `-right-` 类 |
 | 输入框 | `textarea.ant-input` |
 | 发送按钮 | `[class*="sendbox-bottom"]` 内文本「发 送」 |
-| 在售商品 | `goofish.com/personal`（我发布的）→ 点「在售」→ `a[href*="item?id="]` + `[class*="price-wrap"]` |
+| 在售商品 | `goofish.com/personal`（我发布的）→ 点「在售」tab → `a[href*="item?id="]` + `[class*="price-wrap"]` |
 
 已知限制：
 - 会话标识用买家昵称（IM 页 DOM 无会话 id）；同名买家会串，需人工注意
-- 商品添加有两种：UI 里「从我的发布获取」读 `goofish.com/personal` 的在售列表勾选（实测 43 件），或手动填 item_id
+- 商品添加有两种：UI 里「从我的发布获取」读 `goofish.com/personal` 的在售列表勾选（实测 9 件），或手动填 item_id
+- 「在售」是前端筛选，必须真的点到 tab：tab 文案带计数（「在售9」）所以用前缀匹配；tab 栏渲染后才出现，
+  复用旧页面时常常还没出来 → 每次重新导航再点，并用 tab 上的数字自校验条数（不符重试一次）
 - 卖家订单页入口未打通（`/bought` 只有买家视角），发货触发目前依赖 LLM 的 payment 意图 + 会话幂等；卡密池为空时自动转人工
 - 「转人工」的判定靠内容闸门，不承诺万无一失；高危纠纷请人工接管
 

@@ -40,11 +40,9 @@ def create_app(service: Service) -> FastAPI:
             "dry_run_default": True,
             "items": store.list_items(),
             "conversations": store.list_conversations(),
-            "settings": {
-                k: (v if k != "api_key" else ("已配置" if v else ""))
-                for k, v in service.settings().items()
-            },
+            "settings": {k: v for k, v in service.settings().items() if k != "api_key"},
             "api_key_set": bool(service.settings().get("api_key")),
+            "api_key_masked": service.masked_key(),
         }
 
     @app.get("/api/items/discover")
@@ -132,6 +130,11 @@ def create_app(service: Service) -> FastAPI:
             if body.get(key) is not None and body.get(key) != "":
                 store.set_setting(key, str(body[key]))
         return {"ok": True}
+
+    @app.post("/api/llm/test")
+    def llm_test():
+        result = service.llm_test()
+        return JSONResponse(result, status_code=200 if result.get("ok") else 502)
 
     @app.post("/api/guard")
     async def guard(request: Request):

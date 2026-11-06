@@ -38,6 +38,42 @@ class Service:
 
     # ---- 设置 ----
 
+    def masked_key(self) -> str:
+        key = self.store.get_setting("api_key")
+        if not key:
+            return ""
+        if len(key) <= 12:
+            return key[:3] + "*" * (len(key) - 3)
+        return f"{key[:7]}…{key[-4:]}"
+
+    def llm_test(self) -> dict:
+        """用当前 key 真打一次模型，确认可用（返回模型名与耗时）。"""
+        key = self.store.get_setting("api_key")
+        if not key:
+            return {"ok": False, "error": "未配置 API Key"}
+        model = self.store.get_setting("model", "deepseek-v4-flash")
+        started = time.time()
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=key, base_url="https://api.deepseek.com")
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": '只输出 JSON：{"ok":true}'}],
+                response_format={"type": "json_object"},
+                max_tokens=256,
+                timeout=30,
+            )
+        except Exception as exc:  # noqa: BLE001 - 原样回给 UI
+            return {"ok": False, "error": str(exc)[:200], "model": model}
+        latency = int((time.time() - started) * 1000)
+        return {
+            "ok": True,
+            "model": getattr(resp, "model", model),
+            "latency_ms": latency,
+            "reply": (resp.choices[0].message.content or "").strip()[:60],
+        }
+
     def settings(self) -> dict:
         return {
             "api_key": self.store.get_setting("api_key"),

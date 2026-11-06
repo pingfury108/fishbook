@@ -161,6 +161,13 @@
   .banner { display: none; background: var(--danger-weak); color: var(--danger); border-bottom: 1px solid oklch(0.9 0.04 27);
             padding: 9px 32px; font-size: 13px; }
   .banner button { margin-left: 10px; }
+  .keycard { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--radius-s);
+             background: var(--bg); border: 1px solid var(--line); margin-top: 6px; }
+  .keycard b { font-family: var(--mono); font-size: 13px; letter-spacing: 0.3px; }
+  .status-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin-top: 10px; min-height: 20px; }
+  .status-line.ok { color: var(--ok); }
+  .status-line.bad { color: var(--danger); }
+  .status-line.busy { color: var(--text-2); }
   #toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
            padding: 9px 18px; border-radius: 999px; font-size: 13px; opacity: 0; pointer-events: none;
            transition: opacity 0.2s; z-index: 50; }
@@ -497,17 +504,36 @@ function renderSettings(st) {
   $("#main").innerHTML = `
     <div class="page-head"><div><h2>设置</h2><p>LLM 与安全护栏。</p></div></div>
     <div class="panel">
-      <div class="panel-head"><b>DeepSeek 客服引擎</b>
-        ${st.api_key_set ? '<span class="badge green">Key 已配置</span>' : '<span class="badge red">未配置 · LLM 消息将转人工</span>'}</div>
+      <div class="panel-head">
+        <b>DeepSeek 客服引擎</b>
+        ${st.api_key_set
+          ? '<span class="badge green">Key 已配置</span>'
+          : '<span class="badge red">Key 未配置 · LLM 消息一律转人工</span>'}
+      </div>
       <div class="panel-body">
-        <label>API Key ${st.api_key_set ? "（留空保持不变）" : ""}</label>
-        <input id="s_key" type="password" placeholder="sk-...">
+        <label>API Key</label>
+        ${st.api_key_set
+          ? `<div class="keycard">
+               <b>${esc(st.api_key_masked)}</b>
+               <span class="muted">已生效</span>
+               <div style="flex:1"></div>
+               <button class="btn sm" onclick="toggleKeyInput()">更换</button>
+               <button class="btn sm" onclick="testKey()">测试连接</button>
+             </div>
+             <div id="keyInputWrap" style="display:none; margin-top:10px">
+               <input id="s_key" type="password" placeholder="输入新的 sk-...（留空则不修改）">
+             </div>`
+          : `<input id="s_key" type="password" placeholder="sk-... 粘贴你的 DeepSeek Key">
+             <p class="muted" style="margin:6px 0 0">保存后会立即测一次连接，确认 key 可用。</p>`}
         <div class="form-row">
           <div><label>模型</label><input id="s_model" value="${esc(st.settings.model || "deepseek-v4-flash")}"></div>
           <div><label>店铺名（自动读取闲鱼主页昵称）</label>
             <input id="s_shop" value="${esc(st.settings.shop || "读取中…")}" readonly></div>
         </div>
-        <div style="margin-top:16px"><button class="btn primary" onclick="saveSettings()">保存设置</button></div>
+        <div class="status-line" id="keyStatus"></div>
+        <div style="margin-top:14px">
+          <button class="btn primary" onclick="saveSettings()">保存设置</button>
+        </div>
       </div>
     </div>
     <div class="panel">
@@ -532,12 +558,50 @@ function renderSettings(st) {
   loadShopName();
 }
 
+function toggleKeyInput() {
+  const wrap = $("#keyInputWrap");
+  wrap.style.display = wrap.style.display === "none" ? "block" : "none";
+  if (wrap.style.display === "block") $("#s_key").focus();
+}
+
+function setKeyStatus(cls, text) {
+  const el = $("#keyStatus");
+  if (!el) return;
+  el.className = "status-line " + cls;
+  el.innerHTML = text;
+}
+
+async function testKey() {
+  setKeyStatus("busy", '<span class="spin"></span> 正在测试模型连接…');
+  try {
+    const r = await api("/api/llm/test");
+    setKeyStatus("ok", `✓ 连接正常 · 模型 ${esc(r.model)} · ${r.latency_ms}ms`);
+    toast("模型可用");
+  } catch (e) {
+    setKeyStatus("bad", "✗ 连接失败：" + esc(e.message));
+    toast("测试失败");
+  }
+}
+
 async function saveSettings() {
   const body = {};
-  if ($("#s_key").value) body.api_key = $("#s_key").value;
+  const keyInput = $("#s_key");
+  if (keyInput && keyInput.value.trim()) body.api_key = keyInput.value.trim();
   body.model = $("#s_model").value;
-  await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
-  toast("已保存");
+  setKeyStatus("busy", '<span class="spin"></span> 保存并测试中…');
+  try {
+    await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
+  } catch (e) {
+    setKeyStatus("bad", "保存失败：" + esc(e.message));
+    return;
+  }
+  const st = await api("/api/status");
+  if (!st.api_key_set) {
+    setKeyStatus("bad", "✗ 还没有 API Key，LLM 消息会转人工");
+    refresh();
+    return;
+  }
+  await testKey();
   refresh();
 }
 
