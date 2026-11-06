@@ -32,12 +32,21 @@ def create_app(service: Service) -> FastAPI:
         if cached:
             return {"ok": True, "shop": cached, "cached": True}
         try:
-            name = service.worker.submit(lambda ctx: personal.shop_name(ctx.personal_page))
+            name = personal.shop_name_once(service.cdp_endpoint)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=502)
         if name:
             store.set_setting("shop", name)
         return {"ok": True, "shop": name or "", "cached": False}
+
+    def _linked_conversations() -> list[dict]:
+        """只返回已关联到「存在且已接管」商品的会话（未关联的不进列表）。"""
+        managed = {item["item_id"] for item in store.list_items()}
+        return [
+            conv
+            for conv in store.list_conversations()
+            if conv.get("item_id") and conv["item_id"] in managed
+        ]
 
     @app.get("/api/status")
     def status():
@@ -45,7 +54,7 @@ def create_app(service: Service) -> FastAPI:
             "paused": service.paused.is_set(),
             "dry_run_default": True,
             "items": store.list_items(),
-            "conversations": store.list_conversations(),
+            "conversations": _linked_conversations(),
             "settings": {k: v for k, v in service.settings().items() if k != "api_key"},
             "api_key_set": bool(service.settings().get("api_key")),
             "api_key_masked": service.masked_key(),

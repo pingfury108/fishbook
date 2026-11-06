@@ -478,11 +478,11 @@ async function renderConvs(st) {
   $("#main").innerHTML = `
     <div class="page-head">
       <div><h2>会话</h2>
-        <p>轮询间隔 25~45 秒。会话需关联到「接管中」的商品才会被 agent 接管；
-           只有一个托管商品时会自动关联，多个商品需手动关联。
-           显示「人工」的会话 agent 不再介入（手动发过消息就会切成人工）。</p></div>
+        <p>只列出已关联到「自己的商品」的会话；未关联的不会显示。
+           只有一个托管商品时会自动关联，多个商品按会话里的商品标题匹配，匹配不到才需手动关联。
+           标「人工」的会话 agent 不再介入（手动发过消息就会切成人工）。</p></div>
     </div>
-    <div class="panel">${rows || '<div class="empty">暂无会话<br><span class="muted">买家来信后会出现在这里</span></div>'}</div>
+    <div class="panel">${rows || '<div class="empty">还没有已关联的会话<br><span class="muted">买家来信、且能对上你的商品后才会出现在这里</span></div>'}</div>
     <div class="panel">
       <div class="panel-head"><b>关联会话 → 商品</b></div>
       <div class="panel-body">

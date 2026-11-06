@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import random
 import time
 
@@ -52,9 +51,7 @@ def wait_js(page: CDP, expr: str, timeout: float = 20.0) -> bool:
 def goto_and_wait(
     page: CDP, url: str, ready_js: str, timeout: float = 20.0, what: str = "目标节点"
 ) -> None:
-    # 后台标签页的定时器会被节流，先把该标签拉到前台
-    with contextlib.suppress(CDPError):
-        page.send("Page.bringToFront")
+    # 不调用 Page.bringToFront：不抢用户窗口焦点
     page.send("Page.navigate", {"url": url})
     if not wait_js(page, ready_js, timeout):
         raise StructureError(f"页面结构不符：{timeout:.0f}s 内未出现{what} —— {url}")

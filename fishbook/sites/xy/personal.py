@@ -43,25 +43,74 @@ CLICK_TAB_JS = """((name) => {
 })("""
 
 
-def ensure_page(cdp_endpoint: str, page: CDP | None) -> CDP:
-    """拿一个停在「我发布的」页面的长驻连接；没有标签就新开一个。"""
-    if page is not None:
-        ok = False
-        with contextlib.suppress(Exception):
-            ok = DOMAIN in page.url()
-        if ok:
-            return page
-        page.close()
+def _close_other_tabs(base: str, keep_ws: str) -> None:
+    """个人页标签也只保留一个。"""
+    from ... import cdp as cdp_mod
 
+    keep = (keep_ws or "").rstrip("/").rsplit("/", 1)[-1]
+    for target in cdp_mod.page_targets(base):
+        if "goofish.com/personal" not in (target.get("url") or ""):
+            continue
+        if target.get("id") == keep:
+            continue
+        cdp_mod.close_tab(base, target.get("id", ""))
+
+
+def ensure_page(cdp_endpoint: str, page: CDP | None) -> CDP:
+    """拿一个停在「我发布的」页面的长驻连接：优先复用，其次新开唯一一个。"""
     from ... import cdp as cdp_mod
 
     base, _ = cdp_mod.normalize_endpoint(cdp_endpoint)
+
+    if page is not None:
+        on_page = False
+        with contextlib.suppress(Exception):
+            on_page = DOMAIN in page.url()
+        if on_page:
+            _close_other_tabs(base, page.ws_url)
+            goto_personal(page)  # 不在线时内部会刷新
+            return page
+        goto_personal(page)  # 同一个连接导航过去，不新开
+        _close_other_tabs(base, page.ws_url)
+        return page
+
     ws_url = find_target_url(base, DOMAIN)
-    if not ws_url:
-        ws_url = open_tab(base, PERSONAL_URL)["ws_url"]
-    page = cdp_mod.CDP(ws_url).connect()
+    if ws_url:
+        page = cdp_mod.CDP(ws_url).connect()
+        _close_other_tabs(base, page.ws_url)
+        goto_personal(page)
+        return page
+
+    tab = open_tab(base, PERSONAL_URL)
+    page = cdp_mod.CDP(tab["ws_url"]).connect()
+    _close_other_tabs(base, page.ws_url)
     goto_personal(page)
     return page
+
+
+def shop_name_once(cdp_endpoint: str) -> str:
+    """读店铺名：需要临时标签时用完立刻关掉，不留残留。"""
+    from ... import cdp as cdp_mod
+
+    base, _ = cdp_mod.normalize_endpoint(cdp_endpoint)
+    existing = find_target_url(base, DOMAIN)
+    page = None
+    opened_id = ""
+    try:
+        if existing:
+            page = cdp_mod.CDP(existing).connect()
+        else:
+            tab = open_tab(base, PERSONAL_URL)
+            page = cdp_mod.CDP(tab["ws_url"]).connect()
+            opened_id = tab["target_id"]
+        goto_personal(page)
+        return shop_name(page)
+    finally:
+        if page is not None:
+            with contextlib.suppress(Exception):
+                page.close()
+        if opened_id:
+            cdp_mod.close_tab(base, opened_id)
 
 
 def discover_once(cdp_endpoint: str) -> list[dict]:
@@ -91,9 +140,21 @@ def discover_once(cdp_endpoint: str) -> list[dict]:
 def goto_personal(page: CDP, timeout: float = 20.0) -> None:
     from ...cdp import is_transient
 
+    # 已在个人页且还活着 → 直接复用，不重新导航
+    on_page = False
     with contextlib.suppress(Exception):
-        page.send("Page.bringToFront")
-    page.send("Page.navigate", {"url": PERSONAL_URL})
+        on_page = DOMAIN in page.url() and page.evaluate(TAB_READY_JS, retries=1)
+    if on_page:
+        time.sleep(0.5)
+        return
+
+    in_domain = False
+    with contextlib.suppress(Exception):
+        in_domain = DOMAIN in page.url()
+    if in_domain:
+        page.send("Page.reload")  # 页面死了就刷新这个标签
+    else:
+        page.send("Page.navigate", {"url": PERSONAL_URL})
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:

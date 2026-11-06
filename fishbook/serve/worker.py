@@ -1,7 +1,7 @@
 """浏览器操作队列：所有页面读/写动作在单线程里串行执行。
 
-原因：页面级 CDP 端点同一时刻只允许一个客户端；UI 自动化（bringToFront/打字/点击）
-并发必乱。watcher / agent / sender / UI 手动操作全部 submit 到这里。
+原因：页面级 CDP 端点同一时刻只允许一个客户端；UI 自动化（打字/点击）并发必乱。
+另外：绝不调用 Page.bringToFront —— 那会把浏览器窗口抢到最前，打扰用户。watcher / agent / sender / UI 手动操作全部 submit 到这里。
 
 worker 拥有两个长驻连接（worker 线程内使用）：
 - ctx.page        IM 页（goofish.com/im），消息轮询与发送

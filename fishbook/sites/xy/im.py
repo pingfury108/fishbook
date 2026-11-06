@@ -38,42 +38,92 @@ OPEN_BY_INDEX_JS = """((idx) => {
 HEADINFO_API = "message.headinfo"
 
 
-def ensure_page(cdp_endpoint: str, page: CDP | None) -> CDP:
-    """拿一个停在 IM 页的长驻连接（worker 线程独占）。"""
-    if page is not None:
-        ok = False
-        with contextlib.suppress(Exception):  # 连接坏了就重建
-            ok = "goofish.com/im" in page.url()
-        if ok:
-            return page
-        page.close()
+IM_DOMAIN = "goofish.com/im"
+READY_JS = (
+    "document.readyState === 'complete' "
+    "&& !!document.querySelector('[class*=\"conversation-item\"]')"
+)
+
+
+def _target_id(ws_url: str) -> str:
+    return (ws_url or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _close_other_im_tabs(base: str, keep_ws: str) -> None:
+    """IM 标签只保留一个：把其它闲鱼 IM 标签关掉，绝不多开。"""
     from ... import cdp as cdp_mod
 
-    ws_url, _ = cdp_mod.resolve_target(cdp_endpoint, "goofish.com")
-    page = cdp_mod.CDP(ws_url).connect()
-    with contextlib.suppress(Exception):
-        already = "goofish.com/im" in page.url()
-    if not already:
-        goto_im(page)
-    return page
+    keep = _target_id(keep_ws)
+    for target in cdp_mod.page_targets(base):
+        url = target.get("url") or ""
+        if IM_DOMAIN not in url:
+            continue
+        if target.get("id") == keep:
+            continue
+        cdp_mod.close_tab(base, target.get("id", ""))
 
 
-def goto_im(page: CDP) -> None:
-    from ...cdp import is_transient
+def _ready(page: CDP, timeout: float = 12.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with contextlib.suppress(Exception):  # 导航中上下文会被销毁
+            if page.evaluate(READY_JS, retries=1):
+                return True
+        time.sleep(0.4)
+    return False
+
+
+def goto_im(page: CDP, reload: bool = False) -> None:
+    """确保页面在 IM 页且会话列表已渲染；不在线就刷新，不新开标签。"""
     from ...errors import StructureError
 
-    page.send("Page.bringToFront")
-    page.send("Page.navigate", {"url": IM_URL})
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        try:
-            if page.evaluate("document.readyState === 'complete' && location.pathname === '/im'"):
+    with contextlib.suppress(Exception):
+        if "goofish.com/im" in page.url() and not reload:
+            if _ready(page, timeout=8.0):
                 return
-        except Exception as exc:
-            if not is_transient(exc):
-                raise
-        time.sleep(0.3)
-    raise StructureError(f"IM 页 15s 未就绪: {IM_URL}")
+            reload = True  # 在 IM 页但这页是死的 → 刷新
+
+    if reload or "goofish.com/im" not in (page.url() or ""):
+        page.send("Page.reload" if reload else "Page.navigate", {} if reload else {"url": IM_URL})
+
+    if not _ready(page, timeout=15.0):
+        # 还不行就再整页导航一次，仍然只用这一个标签
+        page.send("Page.navigate", {"url": IM_URL})
+        if not _ready(page, timeout=15.0):
+            raise StructureError(f"IM 页 15s 未就绪: {IM_URL}")
+
+
+def ensure_page(cdp_endpoint: str, page: CDP | None) -> CDP:
+    """拿 IM 长驻连接：优先复用现有连接/现有标签，其次新开唯一一个。"""
+    from ... import cdp as cdp_mod
+
+    base, _ = cdp_mod.normalize_endpoint(cdp_endpoint)
+
+    if page is not None:
+        on_im = False
+        with contextlib.suppress(Exception):
+            on_im = IM_DOMAIN in page.url()
+        if on_im:
+            _close_other_im_tabs(base, page.ws_url)
+            goto_im(page)  # 死页面会自动 reload
+            return page
+        # 同一个连接导航回 IM，不开新标签
+        goto_im(page)
+        _close_other_im_tabs(base, page.ws_url)
+        return page
+
+    existing = cdp_mod.find_target_url(base, IM_DOMAIN)
+    if existing:
+        page = cdp_mod.CDP(existing).connect()
+        _close_other_im_tabs(base, page.ws_url)
+        goto_im(page)
+        return page
+
+    tab = cdp_mod.open_tab(base, IM_URL)
+    page = cdp_mod.CDP(tab["ws_url"]).connect()
+    _close_other_im_tabs(base, page.ws_url)
+    goto_im(page, reload=False)
+    return page
 
 
 def scan(page: CDP) -> dict:
