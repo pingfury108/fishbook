@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   item_id TEXT DEFAULT '',            -- 关联的托管商品
   mode TEXT DEFAULT 'auto',           -- auto / manual
   unread INTEGER DEFAULT 0,
-  last_msg TEXT DEFAULT '',
+  preview TEXT DEFAULT '',            -- 会话行当前预览（每轮刷新）
+  last_msg TEXT DEFAULT '',           -- 已处理到的预览（用于判断有没有新消息）
   last_msg_at REAL DEFAULT 0,
   replied_at REAL DEFAULT 0,          -- agent 上次回复时间
   shipped_at REAL DEFAULT 0,          -- 本会话已自动发货时间（幂等）
@@ -79,6 +80,9 @@ class Store:
 
     def _migrate(self) -> None:
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(managed_items)")}
+        conv_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(conversations)")}
+        if "preview" not in conv_cols:
+            self._conn.execute("ALTER TABLE conversations ADD COLUMN preview TEXT DEFAULT ''")
         for col in ("item_desc", "item_status"):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE managed_items ADD COLUMN {col} TEXT DEFAULT ''")
@@ -176,14 +180,15 @@ class Store:
 
     # ---- conversations ----
 
-    def upsert_conversation(self, name: str, unread: int = 0, last_msg: str = "") -> None:
+    def upsert_conversation(self, name: str, unread: int = 0, preview: str = "") -> None:
+        """刷新未读与当前预览；last_msg（已处理到的预览）保持不变。"""
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO conversations(name, unread, last_msg, last_msg_at, updated_at) "
+                "INSERT INTO conversations(name, unread, preview, last_msg_at, updated_at) "
                 "VALUES(?, ?, ?, ?, ?) "
                 "ON CONFLICT(name) DO UPDATE SET unread=excluded.unread, "
-                "last_msg=excluded.last_msg, last_msg_at=excluded.last_msg_at, updated_at=excluded.updated_at",
-                (name, unread, last_msg, now(), now()),
+                "preview=excluded.preview, last_msg_at=excluded.last_msg_at, updated_at=excluded.updated_at",
+                (name, unread, preview, now(), now()),
             )
 
     def get_conversation(self, name: str) -> dict | None:

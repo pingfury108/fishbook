@@ -123,20 +123,24 @@ class Service:
                     self.store.set_conversation(conv["name"], item_id=guessed)
                     log(f"[watcher] {conv['name']} 自动关联到商品 {guessed}")
 
-        # 有未读且已接管的会话才进一步处理
+        # 新消息判定：不能只看未读——IM 标签一直开着，新消息会被页面立刻标成已读。
+        # 所以用「预览文本变了」作为主信号，未读徽标只作为补充。
         targets = []
         for conv in conversations:
-            if not conv.get("unread"):
-                continue
             name = conv["name"]
             if self._is_system_chat(name):
                 continue
             record = self.store.get_conversation(name) or {}
+            preview = (conv.get("preview") or "").strip()
+            prev = (record.get("last_msg") or "").strip()
+            fresh = bool(conv.get("unread")) or (preview and preview != prev)
+            if not fresh:
+                continue
+
             item_id = record.get("item_id") or ""
             item = self.store.get_item(item_id) if item_id else None
             if not item or not item.get("managed"):
                 log(f"[watcher] 跳过 {name}: 未关联到已接管商品")
-                self.store.upsert_conversation(name, conv["unread"], conv["preview"])
                 continue
             if record.get("mode") == "manual":
                 log(f"[watcher] 跳过 {name}: 人工模式（UI 里可切回自动）")
@@ -147,7 +151,13 @@ class Service:
             return
 
         for conv, item in targets:
-            self._handle(conv, item)
+            try:
+                self._handle(conv, item)
+            finally:
+                # 记住这一轮的预览，避免下一轮重复处理（含自己刚发出去的消息）
+                self.store.set_conversation(
+                    conv["name"], last_msg=(conv.get("preview") or "").strip()
+                )
             sleep_jitter()
 
     @staticmethod
@@ -183,7 +193,13 @@ class Service:
             return
         snapshot = self.worker.submit(lambda ctx: im.read(ctx.page, limit=20))
         history = snapshot.get("messages") or []
-        if not history or history[-1]["side"] != "other":
+        if not history:
+            log(f"[watcher] {name} 读不到消息")
+            return
+        last = history[-1]
+        log(f"[watcher] {name} 最后一条: {last['side']} | {last['text'][:40]}")
+        if last["side"] != "other":
+            log(f"[watcher] {name} 最后一条是自己发的，跳过")
             return
 
         self.store.set_conversation(

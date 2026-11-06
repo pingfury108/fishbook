@@ -446,7 +446,7 @@ async function renderConvs(st) {
       <div class="avatar">${esc(c.name.slice(0, 1))}</div>
       <div class="conv-main">
         <div class="conv-name">${esc(c.name)} ${modeBadge} ${unreadBadge}</div>
-        <div class="conv-preview">${esc(c.last_msg || "（暂无消息）")}</div>
+        <div class="conv-preview">${esc(c.preview || c.last_msg || "（暂无消息）")}</div>
       </div>
       <div>${item
         ? `<span class="badge">${esc((item.title || item.item_id).slice(0, 14))}</span>`
